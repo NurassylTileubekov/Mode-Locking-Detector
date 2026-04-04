@@ -1,0 +1,25 @@
+# Build output
+Debug/
+Release/
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+# IDE specific
+.settings/
+.cproject
+.project
+*.launch
+
+# STM32CubeIDE generated
+STM32CubeIDE/.metadata/
+
+# Object files and dependency files
+*.o
+*.d
+*.su
+
+# Logs
+*.log
