@@ -15,6 +15,7 @@ set(MX_Include_Dirs
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32G4xx_HAL_Driver/Inc/Legacy
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/CMSIS/Device/ST/STM32G4xx/Include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/CMSIS/Include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Middlewares/Third_Party/ARM_CMSIS/CMSIS/DSP/Include
 )
 
 # STM32CubeMX generated application sources
@@ -46,6 +47,8 @@ set(STM32_Drivers_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_pwr.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_pwr_ex.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_cortex.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_uart.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_uart_ex.c
 )
 
 # Drivers Midllewares
@@ -55,9 +58,11 @@ set(STM32_Drivers_Src
 # Link directories setup
 set(MX_LINK_DIRS
 
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Middlewares/Third_Party/ARM_CMSIS/CMSIS/DSP/Lib/GCC
 )
 # Project static libraries
-set(MX_LINK_LIBS 
+set(MX_LINK_LIBS  
+	:libarm_cortexM4lf_math.a
     STM32_Drivers
     ${TOOLCHAIN_LINK_LIBRARIES}
     

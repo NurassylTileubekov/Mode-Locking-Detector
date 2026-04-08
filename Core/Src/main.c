@@ -21,8 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <math.h>
+#include <stdio.h>
 #include <string.h>
+#include "CV.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,36 +45,32 @@
 ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
+UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_tx;
+
 /* USER CODE BEGIN PV */
 #ifndef BUF_SIZE
 #define BUF_SIZE 2000
 #endif
-enum laser_status{
-  NOT_MODE_LOCKED,
-  Q_SWITCHING,
-  MODE_LOCKED
-};
-enum cv_status{
-  UNSTABLE,
-  STABLE
-};
-typedef struct {
-  float threshold_cv;
-  uint16_t stability_window;
-}laser_par_t;
 
-typedef struct {
-  uint16_t stability_counter;
+typedef struct __attribute__((packed)) {
+  uint8_t frame_start;
+  float avg_mV_rms;
   float current_cv;
-  enum laser_status laser_status;
-  enum cv_status cv_status;
-}laser_state_t;
+  uint8_t frame_end;
+}laser_frame_t;
 
 uint16_t ADCval[BUF_SIZE];
-laser_state_t laser_state = {0,0.0f, NOT_MODE_LOCKED,UNSTABLE};
+laser_state_t laser_state = { 0,0.0f, NOT_MODE_LOCKED,UNSTABLE};
 laser_par_t laser_par = {1.0f, 100};
+laser_frame_t frame = {0xAA, 0.0f, 0.0f, 0xBB};
 volatile uint8_t ADC_flag = 0;
 volatile uint8_t ADC_overrun = 0;
+volatile uint8_t TxCount = 0;
+volatile uint8_t UART_underrun = 0;
+volatile uint8_t UART_flag = 0;
+
+float buf[2] = {0.0f, 0.0f};
 
 /* USER CODE END PV */
 
@@ -82,106 +79,20 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void calcCV(uint16_t* buf, int size, laser_par_t* par, laser_state_t* state) {
-  if (size > 1) {
-    uint32_t sum = 0;
-    for (int i = 0; i < size; i++ ) {
-      sum += buf[i];
-    }
-    if (sum != 0) {
-      float avg = 0.0f;
-      float standard_deviation = 0.0f;
-      avg = (float)sum / (float)size;
-      for (int i = 0; i < size; i++ ) {
-        standard_deviation += ((float)buf[i] - avg) * ((float)buf[i] - avg);
-      }
-      standard_deviation = sqrtf(standard_deviation / (float)(size - 1));
-      state->current_cv = (standard_deviation / avg) * 100.0f;
-      if (state->current_cv < par->threshold_cv) {
-        state->cv_status = STABLE;
-        if (state->laser_status == NOT_MODE_LOCKED || state->laser_status == Q_SWITCHING) {
-          state->laser_status = Q_SWITCHING;
-          state->stability_counter++;
-        }
-      }
-      else {
-        state->cv_status = UNSTABLE;
-        state->laser_status = NOT_MODE_LOCKED;
-        state->stability_counter = 0;
-      }
-      if (state->stability_counter >= par->stability_window) {
-        state->laser_status = MODE_LOCKED;
-      }
-    }
-    else {
-      state->current_cv = 0.0f;
-      state->cv_status = UNSTABLE;
-      state->laser_status = NOT_MODE_LOCKED;
-      state->stability_counter = 0;
-    }
-  }
-  else {
-        state->current_cv = 0.0f;
-        state->cv_status = UNSTABLE;
-        state->laser_status = NOT_MODE_LOCKED;
-        state->stability_counter = 0;
-  }
+void laser_frame_send(laser_state_t* state, laser_frame_t* frame) {
+  frame->frame_start = 0xAA;
+  frame->avg_mV_rms = state->avg_mV_rms;
+  frame->current_cv = state->current_cv;
+  frame->frame_end = 0xBB;
+  HAL_UART_Transmit_DMA(&huart1, (uint8_t*)frame, sizeof(laser_frame_t));
 }
-// void calcCV(uint16_t* buf, int size, laser_par_t* par, laser_state_t* state) {
-//   if (size > 1) {
-//     float sum_power = 0.0f;
-//
-//     // Step 1: Calculate sum of powers (Power is proportional to Voltage^2)
-//     for (int i = 0; i < size; i++) {
-//       float voltage = (float)buf[i];
-//       float power = voltage * voltage;
-//       sum_power += power;
-//     }
-//
-//     if (sum_power > 0.0f) {
-//       float avg_power = sum_power / (float)size;
-//       float variance_power = 0.0f;
-//
-//       // Step 2: Calculate variance of the power
-//       for (int i = 0; i < size; i++) {
-//         float voltage = (float)buf[i];
-//         float power = voltage * voltage;
-//         // Summing the squared differences from the mean
-//         variance_power += (power - avg_power) * (power - avg_power);
-//       }
-//
-//       // Calculate standard deviation
-//       float std_dev_power = sqrtf(variance_power / (float)(size - 1));
-//
-//       // Step 3: Calculate true Power CV as a percentage
-//       state->current_cv = (std_dev_power / avg_power) * 100.0f;
-//
-//       // State machine logic (preserved exactly as you wrote it)
-//       if (state->current_cv < par->threshold_cv) {
-//         state->cv_status = STABLE;
-//         if (state->laser_status == NOT_MODE_LOCKED || state->laser_status == Q_SWITCHING) {
-//           state->laser_status = Q_SWITCHING;
-//           state->stability_counter++;
-//         }
-//       }
-//       else {
-//         state->cv_status = UNSTABLE;
-//         state->laser_status = NOT_MODE_LOCKED;
-//         state->stability_counter = 0;
-//       }
-//
-//       if (state->stability_counter >= par->stability_window) {
-//         state->laser_status = MODE_LOCKED;
-//       }
-//     }
-//   }
-// }
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef* hadc) {
   if (ADC_flag != 0) {
     ADC_overrun += 1;
@@ -194,14 +105,13 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
   }
   ADC_flag = 2;
 }
-// void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-// {
-//   if(huart == &huart1)
-//   {
-//     TxCount++;
-//     HAL_UART_Transmit_IT(&huart1, (uint8_t*)buf, buf_len);
-//   }
-// }
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if(huart == &huart1)
+  {
+    UART_flag = 1;
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -235,12 +145,12 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ADC1_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
   //HAL_OPAMP_Start(&hopamp1);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)ADCval, BUF_SIZE);
-
-  // HAL_UART_Transmit_IT(&huart1, (uint8_t*)buf, buf_len);
+  UART_flag = 1;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -251,10 +161,21 @@ int main(void)
       case 1:
         calcCV(ADCval, BUF_SIZE/2, &laser_par, &laser_state);
         ADC_flag = 0;
+        if (UART_flag != 1) {
+          UART_underrun++;
+        }
+        laser_frame_send(&laser_state, &frame);
+        UART_flag = 0;
         break;
       case 2:
         calcCV(ADCval + BUF_SIZE/2, BUF_SIZE/2, &laser_par, &laser_state);
         ADC_flag = 0;
+        if (huart1.gState == HAL_UART_STATE_READY) {
+          laser_frame_send(&laser_state, &frame);
+        }
+        else {
+          UART_underrun++;
+        }
         break;
       default:
         break;
@@ -277,7 +198,6 @@ int main(void)
     else {
       HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, GPIO_PIN_RESET);
     }
-
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -399,6 +319,54 @@ static void MX_ADC1_Init(void)
 }
 
 /**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -412,6 +380,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
 
 }
 
