@@ -141,8 +141,7 @@ latest_status_code = -1
 latest_cv_raw = np.nan
 latest_cv_thresh_raw = np.nan
 latest_cw_raw = np.nan
-latest_cv_thresh_raw = np.nan
-latest_cw_raw = np.nan
+last_mcu_config_received = None
 
 def _apply_recording_mode(recording):
     record_rgba[:] = RECORD_RGBA if recording else TRANSPARENT_RGBA
@@ -167,7 +166,7 @@ def _fill_new_status_colors(statuses):
     record_img2.set_data(record_rgba)
 
 def update(frame):
-    global byte_buffer, data_rms, data_cw, data_cv, data_cv_threshold, serial_frame_count, is_recording, csv_writer, latest_status_code, latest_cv_raw, latest_cv_thresh_raw, latest_cw_raw
+    global byte_buffer, data_rms, data_cw, data_cv, data_cv_threshold, serial_frame_count, is_recording, csv_writer, latest_status_code, latest_cv_raw, latest_cv_thresh_raw, latest_cw_raw, last_mcu_config_received
     global is_fitting, fit_adc_data, fit_cv_data
 
     if ser is None or not ser.is_open:
@@ -197,9 +196,16 @@ def update(frame):
                 
                 if frame_size == 24:
                     t_win, p_low, p_high, c_low, c_high, t_offset = values
-                    config_str = f"Win={t_win}ms, P_Low={p_low:.1f}, P_High={p_high:.1f}, C_Low={c_low:.1f}, C_High={c_high:.1f}, Offset={t_offset:.2f}"
-                    text_config.set_text(f"MCU Config | {config_str}")
-                    print(f"Received Device Config: {config_str}")
+                    current_config_tuple = (t_win, p_low, p_high, c_low, c_high, t_offset)
+                    if current_config_tuple != last_mcu_config_received:
+                        last_mcu_config_received = current_config_tuple
+                        if 'txt_t_win' in globals():
+                            txt_t_win.set_val(str(t_win))
+                            txt_p_low.set_val(f"{p_low:.1f}")
+                            txt_p_high.set_val(f"{p_high:.1f}")
+                            txt_c_low.set_val(f"{c_low:.1f}")
+                            txt_c_high.set_val(f"{c_high:.1f}")
+                            txt_t_offset.set_val(f"{t_offset:.2f}")
                     idx += frame_size
                     packets_processed += 1
                     parsed = True
