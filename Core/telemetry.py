@@ -49,6 +49,8 @@ FRAME_END = 0xBB
 FRAME_LAYOUTS = (
     (struct.Struct('<fffb'), 15),
     (struct.Struct('<fffi'), 18),
+    (struct.Struct('<fffi'), 18),
+    (struct.Struct('<ffffi'), 22),
     (struct.Struct('<Hfffff'), 24),
 )
 
@@ -63,17 +65,20 @@ STATUS_LABELS = {
 }
 
 STATE_RGBA = {
-    0: np.array([122 / 255, 122 / 255, 122 / 255, 0.50], dtype=float),
-    1: np.array([100 / 255, 100 / 255, 255 / 255, 0.50], dtype=float),
-    2: np.array([255 / 255, 100 / 255, 100 / 255, 0.50], dtype=float),
+    0: np.array([255 / 255, 0 / 255, 255 / 255, 0.50], dtype=float), # Magenta
+    1: np.array([122 / 255, 122 / 255, 122 / 255, 0.50], dtype=float), # Grey
+    2: np.array([255 / 255, 255 / 255, 0 / 255, 0.50], dtype=float), # Yellow
     3: np.array([0.0, 200 / 255, 83 / 255, 0.50], dtype=float),
+    4: np.array([255 / 255, 0.0, 0.0, 0.50], dtype=float), # Red
 }
 RECORD_RGBA = np.array([1.0, 23 / 255, 68 / 255, 0.35], dtype=float)
 TRANSPARENT_RGBA = np.array([0.0, 0.0, 0.0, 0.0], dtype=float)
 
 data_x = np.arange(MAX_POINTS)
 data_rms = np.full(MAX_POINTS, np.nan)
+data_cw = np.full(MAX_POINTS, np.nan)
 data_cv = np.full(MAX_POINTS, np.nan)
+data_cv_threshold = np.full(MAX_POINTS, np.nan)
 data_cv_threshold = np.full(MAX_POINTS, np.nan)
 
 byte_buffer = bytearray()
@@ -95,16 +100,19 @@ except serial.SerialException as e:
 
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 9))
 fig.canvas.manager.set_window_title('Laser Real-Time Telemetry & Config')
+text_config = fig.text(0.5, 0.95, 'MCU Config: --', ha='center', fontsize=11, fontweight='bold', bbox=dict(facecolor='white', alpha=0.7))
 
 line_rms, = ax1.plot(data_x, data_rms, lw=1.5, color='blue', label='ADC mean')
+line_cw, = ax1.plot(data_x, data_cw, lw=1.5, color='green', label='CW mV')
 ax1.set_ylim(0, 4095)  
 ax1.set_xlim(0, MAX_POINTS - 1)
-ax1.set_ylabel('ADC mean value')
-ax1.set_title('Average ADC value (Linear Scale)')
+ax1.set_ylabel('ADC mean value / mV')
+ax1.set_title('Average ADC value & CW mV (Linear Scale)')
 ax1.legend(loc='upper right')
 ax1.grid(True, linestyle='--', alpha=0.7)
 
 line_cv, = ax2.plot(data_x, data_cv, lw=1.5, color='red', label='CV')
+line_cv_threshold, = ax2.plot(data_x, data_cv_threshold, lw=1.5, color='orange', label='CV Threshold')
 line_cv_threshold, = ax2.plot(data_x, data_cv_threshold, lw=1.5, color='orange', label='CV Threshold')
 ax2.legend(loc='upper right')
 ax2.set_ylim(0, 10.0) 
@@ -123,6 +131,7 @@ record_img2 = ax2.imshow(record_rgba, extent=(PIXEL_X_MIN, PIXEL_X_MAX, 0.97, 1.
 OVERLAY_IMAGES = (state_img1, state_img2, record_img1, record_img2)
 
 text_rms = ax1.text(0.02, 0.85, 'ADC: --', transform=ax1.transAxes, fontsize=12, fontweight='bold', color='darkblue', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+text_cw = ax1.text(0.20, 0.85, 'CW: --', transform=ax1.transAxes, fontsize=12, fontweight='bold', color='darkgreen', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
 text_cv = ax2.text(0.02, 0.85, 'CV: --', transform=ax2.transAxes, fontsize=12, fontweight='bold', color='darkred', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
 text_cv_thresh = ax2.text(0.02, 0.72, 'CV Threshold: --', transform=ax2.transAxes, fontsize=12, fontweight='bold', color='darkorange', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
 text_status = ax2.text(0.02, 0.59, 'Status: --', transform=ax2.transAxes, fontsize=11, fontweight='bold', color='black', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
@@ -131,7 +140,9 @@ serial_frame_count = 0
 latest_status_code = -1
 latest_cv_raw = np.nan
 latest_cv_thresh_raw = np.nan
+latest_cw_raw = np.nan
 latest_cv_thresh_raw = np.nan
+latest_cw_raw = np.nan
 
 def _apply_recording_mode(recording):
     record_rgba[:] = RECORD_RGBA if recording else TRANSPARENT_RGBA
@@ -149,14 +160,14 @@ def _fill_new_status_colors(statuses):
     if not statuses: return
     k = len(statuses)
     for i, status in enumerate(statuses):
-        state_rgba[0, MAX_POINTS - k + i, :] = STATE_RGBA.get(status, STATE_RGBA[0])
+        state_rgba[0, MAX_POINTS - k + i, :] = STATE_RGBA.get(status, TRANSPARENT_RGBA)
     state_img1.set_data(state_rgba)
     state_img2.set_data(state_rgba)
     record_img1.set_data(record_rgba)
     record_img2.set_data(record_rgba)
 
 def update(frame):
-    global byte_buffer, data_rms, data_cv, data_cv_threshold, serial_frame_count, is_recording, csv_writer, latest_status_code, latest_cv_raw, latest_cv_thresh_raw
+    global byte_buffer, data_rms, data_cw, data_cv, data_cv_threshold, serial_frame_count, is_recording, csv_writer, latest_status_code, latest_cv_raw, latest_cv_thresh_raw, latest_cw_raw
     global is_fitting, fit_adc_data, fit_cv_data
 
     if ser is None or not ser.is_open:
@@ -167,7 +178,7 @@ def update(frame):
     
     idx = 0
     packets_processed = 0
-    new_rms, new_cv, new_cv_threshold, new_status = [], [], [], []
+    new_rms, new_cw, new_cv, new_cv_threshold, new_status = [], [], [], [], []
     
     while idx < len(byte_buffer):
         if packets_processed >= MAX_PACKETS_PER_UPDATE: break
@@ -186,16 +197,27 @@ def update(frame):
                 
                 if frame_size == 24:
                     t_win, p_low, p_high, c_low, c_high, t_offset = values
-                    print(f"Received Device Config: Win={t_win}ms, P_Low={p_low}, P_High={p_high}, C_Low={c_low}, C_High={c_high}, Offset={t_offset}")
+                    config_str = f"Win={t_win}ms, P_Low={p_low:.1f}, P_High={p_high:.1f}, C_Low={c_low:.1f}, C_High={c_high:.1f}, Offset={t_offset:.2f}"
+                    text_config.set_text(f"MCU Config | {config_str}")
+                    print(f"Received Device Config: {config_str}")
                     idx += frame_size
                     packets_processed += 1
                     parsed = True
                     break
 
-                rms, cv, cv_threshold, status_code = values
+                if frame_size == 22:
+                    rms, cw, cv, cv_threshold, status_code = values
+                elif frame_size == 18:
+                    rms, cv, cv_threshold, status_code = values
+                    cw = np.nan
+                elif frame_size == 15:
+                    rms, cv, cv_threshold, status_code = values
+                    cw = np.nan
+                else:
+                    continue
 
                 if is_recording and csv_writer is not None:
-                    csv_writer.writerow([time.time(), rms, cv, cv_threshold, status_code])
+                    csv_writer.writerow([time.time(), rms, cw, cv, cv_threshold, status_code])
 
                 if is_fitting:
                     # Save every point for better fitting resolution
@@ -205,9 +227,10 @@ def update(frame):
                 serial_frame_count += 1
                 if serial_frame_count % PLOT_DOWNSAMPLE == 0:
                     new_rms.append(rms)
+                    new_cw.append(cw)
                     latest_cv_raw = cv
                     latest_cv_thresh_raw = cv_threshold
-                    latest_cv_thresh_raw = cv_threshold
+                    latest_cw_raw = cw
                     new_cv.append(cv) 
                     new_cv_threshold.append(cv_threshold)
                     new_status.append(status_code)
@@ -231,33 +254,38 @@ def update(frame):
     if k > MAX_POINTS: 
         k = MAX_POINTS
         new_rms = new_rms[-k:]
+        new_cw = new_cw[-k:]
         new_cv = new_cv[-k:]
         new_cv_threshold = new_cv_threshold[-k:]
         new_status = new_status[-k:]
 
     data_rms[:-k] = data_rms[k:]
+    data_cw[:-k] = data_cw[k:]
     data_cv[:-k] = data_cv[k:]
     data_cv_threshold[:-k] = data_cv_threshold[k:]
 
     _shift_state_buffers(k)
     
     data_rms[-k:] = new_rms
+    data_cw[-k:] = new_cw
     data_cv[-k:] = new_cv
     data_cv_threshold[-k:] = new_cv_threshold
 
     line_rms.set_ydata(data_rms)
+    line_cw.set_ydata(data_cw)
     _fill_new_status_colors(new_status)
     line_cv.set_ydata(data_cv)
     line_cv_threshold.set_ydata(data_cv_threshold)
 
     if not np.isnan(data_rms[-1]):
         text_rms.set_text(f"ADC: {data_rms[-1]:.5f}")
+        text_cw.set_text(f"CW: {latest_cw_raw:.5f}")
         text_cv.set_text(f"CV: {latest_cv_raw:.5f}")
         text_cv_thresh.set_text(f"CV Threshold: {latest_cv_thresh_raw:.5f}")
         status_name = STATUS_LABELS.get(latest_status_code, f'UNKNOWN({latest_status_code})')
         text_status.set_text(f"Status: {status_name}")
 
-    return [line_rms, line_cv, line_cv_threshold, text_rms, text_cv, text_cv_thresh, text_status, *OVERLAY_IMAGES]
+    return [line_rms, line_cw, line_cv, line_cv_threshold, text_rms, text_cw, text_cv, text_cv_thresh, text_status, *OVERLAY_IMAGES]
 
 def on_resize(event):
     if 'ani' in globals():
