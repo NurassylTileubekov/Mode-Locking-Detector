@@ -31,7 +31,7 @@ void process_laser_logic(uint16_t* buf, uint16_t size, sliding_cv_t* scv, float*
     //Uncomment if LUT is less than 4095
     //state->current_cv_threshold = lerp(cv_threshold_lut[i], cv_threshold_lut[i + 1], t);
 
-    state->cw_mv= ((float)adc2_val * 3300f) / MAX_ADC_VAL;
+    state->cw_mv= ((float)adc2_val * 3300.0f) / MAX_ADC_VAL;
     state->ml_rms_mv = (scv->current_mean * 3300.0f) / MAX_ADC_VAL;
 
     // Optimized Control Flow
