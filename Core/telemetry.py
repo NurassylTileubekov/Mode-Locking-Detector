@@ -55,7 +55,7 @@ FRAME_LAYOUTS = (
     (struct.Struct('<ifffff'), 26),
 )
 
-TX_FRAME_STRUCT = struct.Struct('<BifffffB')
+TX_FRAME_STRUCT = struct.Struct('<BHfffffB')
 
 STATUS_LABELS = {
     0: 'NO_SIGNAL',
