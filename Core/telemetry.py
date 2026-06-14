@@ -49,12 +49,13 @@ FRAME_END = 0xBB
 FRAME_LAYOUTS = (
     (struct.Struct('<fffb'), 15),
     (struct.Struct('<fffi'), 18),
-    (struct.Struct('<fffi'), 18),
+    (struct.Struct('<ffffB'), 19),
     (struct.Struct('<ffffi'), 22),
     (struct.Struct('<Hfffff'), 24),
+    (struct.Struct('<ifffff'), 26),
 )
 
-TX_FRAME_STRUCT = struct.Struct('<BHfffffB')
+TX_FRAME_STRUCT = struct.Struct('<BifffffB')
 
 STATUS_LABELS = {
     0: 'NO_SIGNAL',
@@ -194,7 +195,7 @@ def update(frame):
             try:
                 values = payload_struct.unpack_from(byte_buffer, idx + 1)
                 
-                if frame_size == 24:
+                if frame_size == 24 or frame_size == 26:
                     t_win, p_low, p_high, c_low, c_high, t_offset = values
                     current_config_tuple = (t_win, p_low, p_high, c_low, c_high, t_offset)
                     if current_config_tuple != last_mcu_config_received:
@@ -211,7 +212,7 @@ def update(frame):
                     parsed = True
                     break
 
-                if frame_size == 22:
+                if frame_size == 22 or frame_size == 19:
                     rms, cw, cv, cv_threshold, status_code = values
                 elif frame_size == 18:
                     rms, cv, cv_threshold, status_code = values
