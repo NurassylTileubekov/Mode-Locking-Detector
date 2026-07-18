@@ -1,4 +1,4 @@
-# MLDS-G4 — Mode-Locking Detection System
+# Mode-Locking Detector
 
 Real-time firmware for an **STM32G474** that classifies the operating state of an
 ultrafast femtosecond laser directly from its power-meter signal, and self-calibrates
