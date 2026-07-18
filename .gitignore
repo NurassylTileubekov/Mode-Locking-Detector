@@ -1,25 +1,42 @@
-# Build output
+# ---- Build output ----
+build/
+cmake-build-*/
 Debug/
 Release/
+
+# Compiled binaries / firmware images
 *.elf
 *.bin
 *.hex
 *.map
 *.lst
+*.list
 
-# IDE specific
+# Object files and dependency/listing files
+*.o
+*.obj
+*.d
+*.su
+*.a
+
+# ---- IDE / editor ----
+.idea/
+.vscode/
 .settings/
 .cproject
 .project
 *.launch
-
-# STM32CubeIDE generated
 STM32CubeIDE/.metadata/
 
-# Object files and dependency files
-*.o
-*.d
-*.su
+# ---- Python (host-side scripts, e.g. telemetry) ----
+# Kept local only — not ready for the repo yet
+Core/telemetry.py
+__pycache__/
+*.py[cod]
+.venv/
+venv/
 
-# Logs
+# ---- Logs & OS cruft ----
 *.log
+.DS_Store
+Thumbs.db

@@ -1,113 +1,117 @@
-// Src/CV.c
 #include "CV.h"
 #include <math.h>
 #include <string.h>
 
 void calc_sliding_cv(uint16_t* new_buf, uint16_t size, uint16_t target_window_ms, sliding_cv_t* scv) {
-    uint32_t chunk_sum = 0;
+    uint32_t chunk_sum    = 0;
     uint64_t chunk_sq_sum = 0;
-    static uint16_t old_target_window_ms = 0;
-    
-    // 1. Calculate statistics for ONLY the newest 1ms chunk
-    for (int i = 0; i < size; i++) {
-        uint32_t val = new_buf[i];
-        chunk_sum += val;
-        chunk_sq_sum += (val * val);
+
+    // Accumulate stats for the newest 1ms chunk (unrolled x4).
+    int i = 0;
+    for (; i <= size - 4; i += 4) {
+        uint32_t v0 = new_buf[i];
+        uint32_t v1 = new_buf[i+1];
+        uint32_t v2 = new_buf[i+2];
+        uint32_t v3 = new_buf[i+3];
+
+        chunk_sum    += v0 + v1 + v2 + v3;
+        chunk_sq_sum += (uint64_t)(v0 * v0) +
+                        (uint64_t)(v1 * v1) +
+                        (uint64_t)(v2 * v2) +
+                        (uint64_t)(v3 * v3);
     }
-    
-    if (target_window_ms > MAX_WINDOW_MS) {
-        target_window_ms = MAX_WINDOW_MS;
+
+    for (; i < size; i++) {
+        uint32_t val  = new_buf[i];
+        chunk_sum    += val;
+        chunk_sq_sum += (uint64_t)(val * val);
     }
-    if (target_window_ms == 0) {
-        target_window_ms = 1;
-    }
-    
-    if (old_target_window_ms != target_window_ms) {
-        // If the window shrank and we have more active chunks than the new window size,
-        // we must remove the oldest excess chunks from our running totals.
+
+    if (target_window_ms > MAX_WINDOW_MS) target_window_ms = MAX_WINDOW_MS;
+    if (target_window_ms == 0)            target_window_ms = 1;
+    if (scv->old_target_window_ms != target_window_ms) {
         while (scv->active_chunks > target_window_ms) {
-            uint16_t tail_idx = (scv->head_idx + MAX_WINDOW_MS - scv->active_chunks) % MAX_WINDOW_MS;
-            scv->total_sum -= scv->sum_history[tail_idx];
-            scv->total_sq_sum -= scv->sq_sum_history[tail_idx];
+            uint16_t tail_idx = scv->head_idx + MAX_WINDOW_MS - scv->active_chunks;
+            if (tail_idx >= MAX_WINDOW_MS) tail_idx -= MAX_WINDOW_MS;
+            scv->total_sum        -= scv->sum_history[tail_idx];
+            scv->total_sq_sum     -= scv->sq_sum_history[tail_idx];
             scv->active_chunks--;
         }
-        old_target_window_ms = target_window_ms;
+        scv->old_target_window_ms = target_window_ms;
     }
 
-    // 2. Remove the oldest 1ms chunk from the running totals if window is full
+    // Evict the oldest chunk if the window is full.
     if (scv->active_chunks >= target_window_ms) {
-        // Find the index of the oldest chunk
-        uint16_t tail_idx = (scv->head_idx + MAX_WINDOW_MS - target_window_ms) % MAX_WINDOW_MS;
-        scv->total_sum -= scv->sum_history[tail_idx];
+        uint16_t tail_idx = scv->head_idx + MAX_WINDOW_MS - target_window_ms;
+        if (tail_idx >= MAX_WINDOW_MS) tail_idx -= MAX_WINDOW_MS;
+
+        scv->total_sum    -= scv->sum_history[tail_idx];
         scv->total_sq_sum -= scv->sq_sum_history[tail_idx];
     } else {
-        scv->active_chunks++; // We are still filling the initial window
+        scv->active_chunks++;
     }
 
-    // 3. Add the newest 1ms chunk to running totals
-    scv->total_sum += chunk_sum;
+    scv->total_sum    += chunk_sum;
     scv->total_sq_sum += chunk_sq_sum;
 
-    // 4. Overwrite the oldest data in the circular buffer with the new data
-    scv->sum_history[scv->head_idx] = chunk_sum;
+    scv->sum_history[scv->head_idx]    = chunk_sum;
     scv->sq_sum_history[scv->head_idx] = chunk_sq_sum;
+    scv->head_idx++;
+    if (scv->head_idx >= MAX_WINDOW_MS) scv->head_idx = 0;
 
-    // Advance the head pointer
-    scv->head_idx = (scv->head_idx + 1) % MAX_WINDOW_MS;
-
-    // 5. Calculate the CV from the running totals
-    uint32_t n_samples = scv->active_chunks * size;
+    uint64_t n_samples = (uint64_t)scv->active_chunks * size;
     if (n_samples > 1) {
-        // Calculate Mean
-        scv->current_mean = (float)scv->total_sum / (float)n_samples;
+        float raw_mean = (float)scv->total_sum / (float)n_samples;
 
-        // Calculate Variance using integer math to prevent catastrophic cancellation
-        // We use algebraic expansion to prevent uint64_t overflow on large windows:
-        // (S^2)/N = q^2*N + 2*q*r + r^2/N  (where q = S/N, r = S%N)
-        uint64_t q = scv->total_sum / n_samples;
-        uint64_t r = scv->total_sum % n_samples;
-        uint64_t mean_of_sum_squared = (q * q * n_samples) + (2 * q * r) + ((r * r) / n_samples);
-
-        uint64_t variance_numerator = 0;
-        
-        if (scv->total_sq_sum > mean_of_sum_squared) {
-            variance_numerator = scv->total_sq_sum - mean_of_sum_squared;
-        }
-        
-        float variance = (float)variance_numerator / (float)(n_samples - 1);
-        float std_deviation = sqrtf(variance);
-
-        // Calculate final CV percentage
-        if (scv->current_mean != 0.0f) {
-            scv->current_cv = (std_deviation / scv->current_mean) * 100.0f;
+        // Variance via Var = E[x^2] - (E[x])^2, kept in integer arithmetic to
+        // avoid catastrophic cancellation. With S = q*N + r:
+        //   S^2/N = q^2*N + 2*q*r + r^2/N   (first two terms exact integers)
+        uint64_t q, r;
+        // Fast-path the common 32-bit case (64-bit division is slow on M4).
+        if (scv->total_sum <= 0xFFFFFFFFULL) {
+            uint32_t ts32 = (uint32_t)scv->total_sum;
+            uint32_t ns32 = (uint32_t)n_samples;
+            q = ts32 / ns32;
+            r = ts32 % ns32;
         } else {
-            scv->current_cv = 0.0f;
+            q = scv->total_sum / n_samples;
+            r = scv->total_sum % n_samples;
         }
+
+        uint64_t mean_sq_int  = (q * q * n_samples) + (2 * q * r);
+
+        float fr = (float)r;
+        float mean_sq_frac = (fr * fr) / (float)n_samples;
+
+        // Bessel-corrected sample variance, split into integer and float parts.
+        float variance = 0.0f;
+        if (scv->total_sq_sum >= mean_sq_int) {
+            uint64_t var_num_int = scv->total_sq_sum - mean_sq_int;
+            variance = ((float)var_num_int - mean_sq_frac) / (float)(n_samples - 1);
+            if (variance < 0.0f) variance = 0.0f;
+        }
+
+        float std_dev = sqrtf(variance);
+
+        scv->current_cv = (raw_mean != 0.0f)
+                        ? (std_dev / raw_mean) * 100.0f
+                        : 0.0f;
+
+        scv->current_mean = raw_mean * (ADC_VREF_MV / MAX_ADC_VAL);
     }
 }
 
-// Generate LUT CV threshold
-void generate_cv_threshold_lut(float* buf) {
+// Populate a LUT mapping ADC value -> CV threshold. Call at startup and after fitting.
+void generate_cv_threshold_lut(float* buf, cv_model_params_t* params) {
+    if (!params) return;
     for (int i = 0; i < CV_LUT_SIZE; i++) {
-        // 1. Calculate corresponding ADC value for the current array index
-        // This ensures the size of the array spans the full 12-bit range
         float adc_val = (float)i * (MAX_ADC_VAL / (float)(CV_LUT_SIZE - 1));
-        
-        // 2. Normalize ADC value to 0.0 - 1.0 matching the regression model
         float x_norm = adc_val / MAX_ADC_VAL;
-        
-        // 3. Prevent domain error (division by zero) for the inverse power law
-        // The x_norm value is clamped to a minimum floor
-        if (x_norm < 0.001f) {
-            x_norm = 0.001f;
-        }
-        
-        // 4. Execute single-precision composite math
-        // y = a*exp(b*x) + c*(x^d) + e
-        float exp_term = PARAM_A * expf(PARAM_B * x_norm);
-        float pow_term = PARAM_C * powf(x_norm, PARAM_D);
-        
-        // 5. Store the calculated geometric threshold in the array
-        buf[i] = exp_term + pow_term + PARAM_E;
+        if (x_norm < 0.001f) x_norm = 0.001f;  // avoid div-by-zero in the power term
+
+        float exp_term = params->a * expf(params->b * x_norm);
+        float pow_term = params->c * powf(x_norm, params->d);
+
+        buf[i] = exp_term + pow_term + params->e;
     }
 }

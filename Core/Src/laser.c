@@ -2,55 +2,49 @@
 #include "laser.h"
 #include <math.h>
 
-
-float lerp(float a, float b, float t) {
-    return a + (b - a) * t;
-}
 void process_laser_logic(uint16_t* buf, uint16_t size, sliding_cv_t* scv, float* cv_threshold_lut,
-    laser_config_t* config, uint16_t adc2_val, laser_state_t* state) {
+    laser_config_t* config, cw_calibration_t* cal, uint16_t adc2_val, laser_state_t* state) {
+    uint8_t has_seen_cw = state->has_seen_cw;
+
     calc_sliding_cv(buf, size, config->target_window_ms, scv);
-    // Calculate exact float index
-    float float_index = (scv->current_mean / (float)MAX_ADC_VAL) * (CV_LUT_SIZE - 1);
-    // Extract base integer index and fractional part (t) for lerp
+
+    // Map the mean signal (mV) to a LUT index.
+    float float_index = (scv->current_mean / ADC_VREF_MV) * (CV_LUT_SIZE - 1);
     int i = (int)float_index;
-    // Safety Clamp!
     if (i < 0) i = 0;
     if (i >= CV_LUT_SIZE) i = CV_LUT_SIZE - 1;
 
-    //Uncomment if LUT is less than 4095
-    //float t = float_index - (float)i;
-    // Clamp bounds to prevent out-of-bounds on array access
-    // if (i < 0) {
-    //     i = 0;
-    //     t = 0.0f;
-    // } else if (i >= CV_LUT_SIZE - 1) {
-    //     i = CV_LUT_SIZE - 2;
-    //     t = 1.0f;
-    // }
-    state->current_cv_threshold = cv_threshold_lut[i] * config->threshold_offset;
-    //Uncomment if LUT is less than 4095
-    //state->current_cv_threshold = lerp(cv_threshold_lut[i], cv_threshold_lut[i + 1], t);
+    state->current_cv_threshold = cv_threshold_lut[i] + config->threshold_offset;
 
-    state->cw_mv= ((float)adc2_val * 3300.0f) / MAX_ADC_VAL;
-    state->ml_rms_mv = (scv->current_mean * 3300.0f) / MAX_ADC_VAL;
+    state->cw_mv = ((float)adc2_val * ADC_VREF_MV) / MAX_ADC_VAL;
+    state->ml_rms_mv = scv->current_mean;
 
-    // Optimized Control Flow
-    if (state->ml_rms_mv >= config->ml_threshold_high || state->cw_mv >= config->cw_threshold_high) {
-        state->status = SATURATED;
-    }
-    else {
-        if (state->ml_rms_mv < config->ml_threshold_low) {
-            if (state->cw_mv < config->ml_threshold_low) {
-                state->status = NO_SIGNAL;
-            } else {
-                state->status = CW;
-            }
+    float ml_high = ML_THRESHOLD_HIGH_MV * config->saturation_percent;
+    float cw_high = cal->cw_saturation   * config->saturation_percent;
+
+    if (state->ml_rms_mv < ML_THRESHOLD_LOW_MV) {
+        // CW regime
+        if (state->cw_mv >= cw_high) {
+            state->status = SATURATED;
+        } else if (state->cw_mv < cal->cw_threshold_low) {
+            state->status = LOW_SIGNAL;
         } else {
-            if (scv->current_cv < state->current_cv_threshold) {
-                state->status = MODE_LOCKED;
-            } else {
-                state->status = UNSTABLE;
-            }
+            state->status = CW;
+            has_seen_cw = 1;
+        }
+    } else {
+        // Mode-locked regime
+        if (state->ml_rms_mv >= ml_high) {
+            state->status = SATURATED;
+        } else if (scv->current_cv < state->current_cv_threshold) {
+            state->status = MODE_LOCKED;
+            has_seen_cw = 0;
+        } else if (has_seen_cw) {
+            state->status = INITIATING;
+        } else {
+            state->status = UNSTABLE;
         }
     }
+
+    state->has_seen_cw = has_seen_cw;
 }

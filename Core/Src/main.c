@@ -26,6 +26,9 @@
 #include "CV.h"
 #include "laser.h"
 #include <math.h>
+#include <float.h>
+#include <sys/stat.h>
+
 #include "util.h"
 /* USER CODE END Includes */
 
@@ -37,11 +40,12 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define CONFIG_FLASH_ADDR 0x0807F800
+#define CV_MODEL_FLASH_ADDR 0x0807F000
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#include "fit.h"
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -57,12 +61,31 @@ DMA_HandleTypeDef hdma_usart1_tx;
 DMA_HandleTypeDef hdma_usart1_rx;
 
 /* USER CODE BEGIN PV */
+typedef enum {
+    APP_STATE_NORMAL,
+    APP_STATE_ACQUIRING,
+    APP_STATE_FITTING
+} app_state_t;
+app_state_t app_state = APP_STATE_NORMAL;
+
+float cv_capture[CV_LUT_SIZE];
+#if CV_CAPTURE_MODE == CV_CAPTURE_MODE_AVG
+uint32_t cv_count_capture[CV_LUT_SIZE];
+#endif
+laser_calibration_t calibration = { DEFAULT_CV_PARAMS, CW_CALIBRATION_DEFAULT };
+float fit_final_mse = 0.0f;
+uint32_t fit_epochs_run = 0;
+float fit_r_squared = 0.0f;
+
+// cw threshold floors captured during the sweep (min cw once ml mean passes each ref).
+float cal_cw_low = FLT_MAX;
+float cal_cw_sat = FLT_MAX;
+
 #ifndef BUF_SIZE
 #define BUF_SIZE 2000
 #endif
 
-// Uncomment to enable DWT cycle profiling in debugger
-#define ENABLE_PROFILING 1
+#define ENABLE_PROFILING 1   // DWT cycle profiling
 
 #ifdef ENABLE_PROFILING
 volatile uint32_t process_laser_logic_cycles = 0;
@@ -72,19 +95,16 @@ volatile uint32_t process_laser_logic_cycles = 0;
 uint16_t adc1_val[BUF_SIZE];
 uint16_t adc2_val;
 
-enum laser_status old_status = NO_SIGNAL;
-
-/* Large memory structures best kept out of the stack */
-sliding_cv_t sliding_cv; // Default 50ms window
+sliding_cv_t sliding_cv = {0};
 float cv_threshold_lut[CV_LUT_SIZE] = {0};
 
-/* ISR Flags (Must be global & volatile) */
+/* ISR flags (global & volatile) */
 volatile uint8_t adc_flag = 0;
 volatile uint16_t adc_overrun = 0;
 volatile uint16_t uart_underrun = 0;
 volatile uint8_t uart_flag = 0;
 
-laser_state_t current_laser_state = {0.0f, NO_SIGNAL};
+laser_state_t current_laser_state = {0};
 laser_frame_t laser_frame = {0};
 /* USER CODE END PV */
 
@@ -104,9 +124,19 @@ static void MX_ADC1_Init(void);
 
 volatile uint16_t uart_rx_flag = 0;
 laser_config_t rx_config_buffer;
-laser_config_t current_config = {0xAA, 100, 0.3f, 3.2f, 0.1f, 3.2f, 1.0, 0xBB}; // Defaults
-laser_config_t old_config = {0xAA, 100, 0.3f, 3.2f, 0.1f, 3.2f, 1.0, 0xBB};
+laser_config_t current_config = LASER_CONFIG_DEFAULT;  // Defaults
 
+// DMA landing buffer for inbound config frames; oversized so a burst with a stray
+// leading byte is still captured whole and can be re-synchronized below.
+#define UART_RX_BUF_SIZE 32
+uint8_t uart_rx_buf[UART_RX_BUF_SIZE];
+
+// (Re)arm idle-terminated DMA reception (restarts at index 0).
+static void uart_rx_arm(void)
+{
+  HAL_UARTEx_ReceiveToIdle_DMA(&huart1, uart_rx_buf, UART_RX_BUF_SIZE);
+  __HAL_DMA_DISABLE_IT(&hdma_usart1_rx, DMA_IT_HT);  // only act on the idle/complete event
+}
 
 void laser_frame_send(laser_frame_t* frame, sliding_cv_t* scv, laser_state_t* state) {
   frame->frame_start = 0xAA;
@@ -117,11 +147,6 @@ void laser_frame_send(laser_frame_t* frame, sliding_cv_t* scv, laser_state_t* st
   frame->status = state->status;
   frame->frame_end = 0xBB;
   HAL_UART_Transmit_DMA(&huart1, (uint8_t*)frame, sizeof(laser_frame_t));
-}
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN) {
-  if (GPIO_PIN == USER_BUTTON_Pin) {
-    current_config = (laser_config_t){0xAA, 100, 0.3f, 3.2f, 0.1f, 3.2f, 1.0, 0xBB};
-  }
 }
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef* hadc) {
   if (hadc == &hadc1) {
@@ -147,14 +172,32 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
   }
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+// Fires on idle line or DMA completion. Scan for a 0xAA..0xBB frame to re-sync on
+// the start byte so a stray leading byte can't permanently break framing.
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
-  if(huart == &huart1)
+  if (huart == &huart1)
   {
-    if (rx_config_buffer.frame_start == 0xAA && rx_config_buffer.frame_end == 0xBB) {
-      uart_rx_flag = 1;
+    for (uint16_t i = 0; i + sizeof(laser_config_t) <= Size; i++) {
+      if (uart_rx_buf[i] == 0xAA &&
+          uart_rx_buf[i + sizeof(laser_config_t) - 1] == 0xBB) {
+        memcpy(&rx_config_buffer, &uart_rx_buf[i], sizeof(laser_config_t));
+        uart_rx_flag = 1;
+        break;
+      }
     }
-    //HAL_UART_Receive_DMA(&huart1, (uint8_t*)&rx_config_buffer, sizeof(laser_config_t));
+    uart_rx_arm();  // always re-arm
+  }
+}
+
+// Recover reception after any UART error, else a single error stops config intake.
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart == &huart1)
+  {
+    __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_OREF | UART_CLEAR_NEF |
+                                   UART_CLEAR_FEF  | UART_CLEAR_PEF);
+    uart_rx_arm();
   }
 }
 /* USER CODE END 0 */
@@ -199,17 +242,27 @@ int main(void)
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 #endif
 
-  generate_cv_threshold_lut(cv_threshold_lut);
-  
-  // Load configuration from Flash
+  // Load calibration from Flash, falling back to defaults if empty/invalid.
+  Flash_Read_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, sizeof(laser_calibration_t) / 4);
+
+  uint32_t* p_a = (uint32_t*)&calibration.cv.a;
+  if (*p_a == 0xFFFFFFFF) {
+      calibration.cv = DEFAULT_CV_PARAMS;
+      calibration.cw = CW_CALIBRATION_DEFAULT;
+  }
+  // !(x > 0) also catches NaN from erased flash.
+  if (!(calibration.cw.cw_saturation > 0.0f) || !(calibration.cw.cw_threshold_low > 0.0f)) {
+      calibration.cw = CW_CALIBRATION_DEFAULT;
+  }
+
+  generate_cv_threshold_lut(cv_threshold_lut, &calibration.cv);
+
   Flash_Read_Data(CONFIG_FLASH_ADDR, (uint32_t*)&current_config, sizeof(laser_config_t) / 4);
   if (current_config.frame_start != 0xAA || current_config.frame_end != 0xBB) {
-    // If Flash is empty or invalid, use default configuration
-    current_config = (laser_config_t){0xAA, 100, 0.3f, 3.2f, 0.1f, 3.2f, 1.0, 0xBB};
+    current_config = LASER_CONFIG_DEFAULT;
   }
-  old_config = current_config;
 
-  HAL_UART_Receive_DMA(&huart1, (uint8_t*)&rx_config_buffer, sizeof(laser_config_t));
+  uart_rx_arm();
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
   HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc1_val, BUF_SIZE);
@@ -225,35 +278,89 @@ int main(void)
     if (uart_rx_flag) {
       uart_rx_flag = 0;
 
-      // Evaluate memory block for parameter changes
+      // Persist config to flash only when it actually changed (blocking, ~20-40ms).
       if (memcmp((void*)&current_config, (void*)&rx_config_buffer, sizeof(laser_config_t)) != 0) {
-
-        // Update the active configuration in RAM
         memcpy((void*)&current_config, (void*)&rx_config_buffer, sizeof(laser_config_t));
-
-        // Calculate 32-bit word count, rounding up for remainders
         uint16_t word_count = (sizeof(laser_config_t) + 3) / 4;
-
-        // Execute blocking flash write (CPU stalls for 20-40ms)
         Flash_Write_Data(CONFIG_FLASH_ADDR, (uint32_t*)&current_config, word_count);
       }
+    }
 
-      // Clear the Overrun Error flag generated by dropped frames
-      __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_OREF);
+    // --- Button state machine: hold to sweep/acquire, release to fit ---
+    if (HAL_GPIO_ReadPin(USER_BUTTON_GPIO_Port, USER_BUTTON_Pin) == GPIO_PIN_RESET) {
+        if (app_state == APP_STATE_NORMAL) {
+            app_state = APP_STATE_ACQUIRING;
+            for (int i = 0; i < CV_LUT_SIZE; i++) {
+                cv_capture[i] = -1.0f;  // -1 = empty bin
+            }
+            cal_cw_low = FLT_MAX;
+            cal_cw_sat = FLT_MAX;
+        }
+    } else {
+        if (app_state == APP_STATE_ACQUIRING) {
+            app_state = APP_STATE_FITTING;
+        }
+    }
 
-      // Re-arm the DMA stream for the next frame
-      HAL_UART_Receive_DMA(&huart1, (uint8_t*)&rx_config_buffer, sizeof(laser_config_t));
+    if (app_state == APP_STATE_FITTING) {
+        cv_model_params_t optimized_params = DEFAULT_CV_PARAMS;
+
+        fit_cv_curve(cv_capture, &optimized_params, &fit_final_mse, &fit_epochs_run, &fit_r_squared);
+
+        calibration.cv = optimized_params;
+
+        // Only commit cw thresholds for reference levels reached during the sweep.
+        if (cal_cw_low < FLT_MAX)  calibration.cw.cw_threshold_low = cal_cw_low;
+        if (cal_cw_sat < FLT_MAX)  calibration.cw.cw_saturation   = cal_cw_sat;
+
+        uint16_t cal_word_count = (sizeof(laser_calibration_t) + 3) / 4;
+        Flash_Write_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
+
+        generate_cv_threshold_lut(cv_threshold_lut, &calibration.cv);
+        app_state = APP_STATE_NORMAL;
     }
 
     uint8_t flag = adc_flag;
     if (flag == 1 || flag == 2) {
       uint16_t* buf_ptr = (flag == 1) ? adc1_val : (adc1_val + BUF_SIZE / 2);
-      
+
 #ifdef ENABLE_PROFILING
       uint32_t start_cycles = DWT->CYCCNT;
 #endif
 
-      process_laser_logic(buf_ptr, BUF_SIZE/2, &sliding_cv, cv_threshold_lut, &current_config, adc2_val, &current_laser_state);
+      laser_config_t active_config = current_config;
+      if (app_state == APP_STATE_ACQUIRING) {
+          active_config.target_window_ms = 1;   // acquisition override
+      }
+
+      process_laser_logic(buf_ptr, BUF_SIZE/2, &sliding_cv, cv_threshold_lut, &active_config, &calibration.cw, adc2_val, &current_laser_state);
+
+      if (app_state == APP_STATE_ACQUIRING) {
+          float mean_mv = sliding_cv.current_mean;
+          float ml_sat  = ML_THRESHOLD_HIGH_MV * current_config.saturation_percent;
+
+          // Skip saturated samples: clipped ADC distorts variance and the LUT is
+          // never consulted above ml_sat anyway.
+          if (mean_mv < ml_sat) {
+              float norm = mean_mv / ADC_VREF_MV;
+              if (norm < 0.0f) norm = 0.0f;
+              int idx = (int)roundf(norm * (float)(CV_LUT_SIZE - 1));
+              if (idx >= 0 && idx < CV_LUT_SIZE) {
+                  int bin_size  = CV_LUT_SIZE / CV_CAPTURE_RESOLUTION;
+                  int mapped_idx = (idx / bin_size) * bin_size;
+                  if (mapped_idx >= CV_LUT_SIZE) mapped_idx = CV_LUT_SIZE - 1;
+                  if (cv_capture[mapped_idx] < 0.0f || sliding_cv.current_cv < cv_capture[mapped_idx])
+                      cv_capture[mapped_idx] = sliding_cv.current_cv;
+              }
+          }
+
+          // cw threshold floors (min cw once ml mean passes each ref); skip dropouts.
+          float cw = current_laser_state.cw_mv;
+          if (cw > 0.0f) {
+              if (mean_mv >= CW_THRESHOLD_LOW_MV && cw < cal_cw_low) cal_cw_low = cw;
+              if (mean_mv >= CW_THRESHOLD_HIGH_MV && cw < cal_cw_sat) cal_cw_sat = cw;
+          }
+      }
 
 #ifdef ENABLE_PROFILING
       process_laser_logic_cycles = DWT->CYCCNT - start_cycles;
@@ -279,58 +386,58 @@ int main(void)
         uart_underrun++;
       }
     }
-    // --- Soft-PWM LED UI Logic ---
+    // LED UI Logic
     uint32_t current_tick = HAL_GetTick();
     static uint32_t last_led_tick = 0;
-    static uint8_t white_led_state = 0; // 0 = OFF, 1 = ON
+    static uint8_t red_led_state = 0;
 
     switch (current_laser_state.status) {
-        case NO_SIGNAL:
-            // Both OFF
+        case LOW_SIGNAL: {
+            // Red briefly pulses, yellow off
+            uint32_t period_ms = 250;
+            uint32_t on_time_ms = 10;
+            uint32_t time_in_period = (current_tick - last_led_tick) % period_ms;
+            if (time_in_period < on_time_ms) {
+                if (red_led_state == 0) {
+                    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+                    red_led_state = 1;
+                }
+            } else {
+                if (red_led_state == 1) {
+                    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+                    red_led_state = 0;
+                }
+            }
             HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_RESET);
-            HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
-            white_led_state = 0;
             break;
+        }
 
         case SATURATED:
-            // Red Solid, White OFF
+            // Red solid, yellow off
             HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_RESET);
             HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
-            white_led_state = 0;
+            red_led_state = 1;
             break;
 
         case CW:
-            // White Solid, Red OFF
-            HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_SET);
+            // Both off
+            HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_RESET);
             HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
-            white_led_state = 1;
+            red_led_state = 0;
             break;
 
         case MODE_LOCKED:
-        case UNSTABLE:
-        {
-            // We are in a Blinking State
-            HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET); // Red always off here
-
-            uint32_t period_ms = (current_laser_state.status == MODE_LOCKED) ? 100 : 500;
-            uint32_t on_time_ms = 50;
-
-            // Software PWM Logic
-            uint32_t time_in_period = (current_tick - last_led_tick) % period_ms;
-
-            if (time_in_period < on_time_ms) {
-                if (white_led_state == 0) {
-                    HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_SET);
-                    white_led_state = 1;
-                }
-            } else {
-                if (white_led_state == 1) {
-                    HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_RESET);
-                    white_led_state = 0;
-                }
-            }
+            // Yellow solid, red off
+            HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+            red_led_state = 0;
             break;
-        }
+
+        case UNSTABLE:
+            // Both off
+            HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_RESET);
+            break;
     }
     /* USER CODE END WHILE */
 
@@ -667,13 +774,9 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : USER_BUTTON_Pin */
   GPIO_InitStruct.Pin = USER_BUTTON_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(USER_BUTTON_GPIO_Port, &GPIO_InitStruct);
-
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI3_IRQn, 3, 0);
-  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

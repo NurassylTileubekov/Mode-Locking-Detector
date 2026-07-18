@@ -5,33 +5,54 @@
 #include <stdint.h>
 #include "CV.h"
 
+// ML detection thresholds (mV). High threshold is scaled by saturation_percent.
+#define ML_THRESHOLD_LOW_MV   300.0f
+#define ML_THRESHOLD_HIGH_MV  3300.0f
+
+#define CW_THRESHOLD_LOW_MV 350.0f
+#define CW_THRESHOLD_HIGH_MV 3250.0f
+
+// Defaults: target_window_ms, threshold_offset, saturation_percent
+#define LASER_CONFIG_DEFAULT (laser_config_t){0xAA, 25, 0.05f, 0.9f, 0xBB}
+
 enum laser_status {
-    NO_SIGNAL,
+    LOW_SIGNAL,
     CW,
     UNSTABLE,
     MODE_LOCKED,
-    SATURATED
+    SATURATED,
+    INITIATING,
 };
 
 // Configuration received from PC
 typedef struct __attribute__((packed)) {
     uint8_t frame_start;
     uint16_t target_window_ms;
-    float ml_threshold_low;
-    float ml_threshold_high;
-    float cw_threshold_low;
-    float cw_threshold_high;
     float threshold_offset;
+    float saturation_percent;   // 0.0 - 1.0, scales the saturation thresholds
     uint8_t frame_end;
 } laser_config_t;
 
-// Output state of the laser logic
+// CW thresholds (mV) produced by calibration; stored in flash with the CV model.
+typedef struct {
+    float cw_threshold_low;
+    float cw_saturation;
+} cw_calibration_t;
+#define CW_CALIBRATION_DEFAULT (cw_calibration_t){100.0f, 3200.0f}
+
+// Combined calibration written to flash in a single page-erase.
+typedef struct {
+    cv_model_params_t cv;
+    cw_calibration_t  cw;
+} laser_calibration_t;
+
 typedef struct {
     float ml_rms_mv;
     float cw_mv;
     float current_cv;
     float current_cv_threshold;
     enum laser_status status;
+    uint8_t has_seen_cw;
 } laser_state_t;
 
 // Telemetry frame sent to PC
@@ -41,10 +62,10 @@ typedef struct __attribute__((packed)) {
     float cw_mv;
     float current_cv;
     float current_cv_threshold;
-    enum laser_status status;
+    uint8_t status;
     uint8_t frame_end;
 } laser_frame_t;
 
-void process_laser_logic(uint16_t* buf, uint16_t size, sliding_cv_t* scv, float* cv_threshold_lut, laser_config_t* config, uint16_t adc2_val, laser_state_t* state);
+void process_laser_logic(uint16_t* buf, uint16_t size, sliding_cv_t* scv, float* cv_threshold_lut, laser_config_t* config, cw_calibration_t* cal, uint16_t adc2_val, laser_state_t* state);
 
 #endif // LASER_H

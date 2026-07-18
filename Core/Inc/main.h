@@ -63,7 +63,6 @@ void Error_Handler(void);
 #define LED_YELLOW_GPIO_Port GPIOC
 #define USER_BUTTON_Pin GPIO_PIN_3
 #define USER_BUTTON_GPIO_Port GPIOB
-#define USER_BUTTON_EXTI_IRQn EXTI3_IRQn
 
 /* USER CODE BEGIN Private defines */
 
