@@ -438,6 +438,9 @@ int main(void)
             HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
             HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_RESET);
             break;
+
+        default:
+            break;
     }
     /* USER CODE END WHILE */
 
@@ -595,7 +598,7 @@ static void MX_ADC2_Init(void)
   hadc2.Init.DMAContinuousRequests = ENABLE;
   hadc2.Init.Overrun = ADC_OVR_DATA_PRESERVED;
   hadc2.Init.OversamplingMode = ENABLE;
-  hadc2.Init.Oversampling.Ratio = ADC_OVERSAMPLING_RATIO_256;
+  hadc2.Init.Oversampling.Ratio = ADC_OVERSAMPLING_RATIO_128;
   hadc2.Init.Oversampling.RightBitShift = ADC_RIGHTBITSHIFT_7;
   hadc2.Init.Oversampling.TriggeredMode = ADC_TRIGGEREDMODE_SINGLE_TRIGGER;
   hadc2.Init.Oversampling.OversamplingStopReset = ADC_REGOVERSAMPLING_CONTINUED_MODE;
@@ -608,7 +611,7 @@ static void MX_ADC2_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_3;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_247CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
