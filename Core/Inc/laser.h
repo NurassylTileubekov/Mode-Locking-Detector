@@ -13,7 +13,14 @@
 #define CW_THRESHOLD_HIGH_MV 3250.0f
 
 // Defaults: target_window_ms, threshold_offset, saturation_percent
-#define LASER_CONFIG_DEFAULT (laser_config_t){0xAA, 25, 0.05f, 0.9f, 0xBB}
+#define LASER_CONFIG_DEFAULT (laser_config_t){0xAA, 0, 25, 0.05f, 0.9f, 0xBB}
+
+// control byte bits
+#define RESET_TO_DEFAULT_BIT 0b00000001
+#define START_ACQUIRING_BIT 0b00000010
+#define STOP_ACQUIRING_BIT 0b00000100
+#define REVERT_TO_PREV_BIT 0b00001000
+#define SERIAL_CONNECTED_BIT 0b10000000
 
 enum laser_status {
     LOW_SIGNAL,
@@ -27,6 +34,7 @@ enum laser_status {
 // Configuration received from PC
 typedef struct __attribute__((packed)) {
     uint8_t frame_start;
+    uint8_t ctrl_byte;
     uint16_t target_window_ms;
     float threshold_offset;
     float saturation_percent;   // 0.0 - 1.0, scales the saturation thresholds
@@ -44,6 +52,8 @@ typedef struct {
 typedef struct {
     cv_model_params_t cv;
     cw_calibration_t  cw;
+    float mse;
+    float r_squared;
 } laser_calibration_t;
 
 typedef struct {
@@ -65,6 +75,14 @@ typedef struct __attribute__((packed)) {
     uint8_t status;
     uint8_t frame_end;
 } laser_frame_t;
+
+// Coefficient of Determination and MSE sent to PC
+typedef struct __attribute__((packed)) {
+    uint8_t frame_start;
+    float mse;
+    float r_squared;
+    uint8_t frame_end;
+} laser_err_t;
 
 void process_laser_logic(uint16_t* buf, uint16_t size, sliding_cv_t* scv, float* cv_threshold_lut, laser_config_t* config, cw_calibration_t* cal, uint16_t adc2_val, laser_state_t* state);
 
