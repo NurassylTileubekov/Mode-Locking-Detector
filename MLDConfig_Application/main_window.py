@@ -112,7 +112,7 @@ class MLDConfigWindow(QMainWindow):
         return conn_group
 
     def _build_display_group(self) -> QGroupBox:
-        disp_group = QGroupBox("Display & Recording")
+        disp_group = QGroupBox("Display and Recording")
         disp_layout = QHBoxLayout(disp_group)
         disp_layout.setContentsMargins(10, 6, 10, 6)
 
