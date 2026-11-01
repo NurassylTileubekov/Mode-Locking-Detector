@@ -11,7 +11,7 @@ from constants import CAPTURE_DIR
 class CsvRecorder:
     """Manages writing live telemetry streams to timestamped CSV files."""
 
-    CSV_HEADER = ['Timestamp', 'ADC_value', 'CW_mV', 'Current_CV', 'CV_Threshold', 'Status_Code']
+    CSV_HEADER = ['Timestamp', 'ML_RMS_mV', 'CW_mV', 'Current_CV', 'CV_Threshold', 'Status_Code']
 
     def __init__(self, out_dir: str = CAPTURE_DIR):
         self.out_dir = out_dir
