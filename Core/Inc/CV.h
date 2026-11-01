@@ -23,7 +23,7 @@ typedef struct {
 #define ADC_VREF_MV 3300.0f
 #define CV_LUT_SIZE     4096
 
-#define CV_CAPTURE_RESOLUTION 256
+#define CV_CAPTURE_RESOLUTION 4096
 
 #define CV_CAPTURE_MODE_MIN 0
 #define CV_CAPTURE_MODE_AVG 1
