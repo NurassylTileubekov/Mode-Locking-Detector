@@ -21,10 +21,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include <float.h>
+#include <stdio.h>
 #include <sys/stat.h>
 
 #include "CV.h"
@@ -38,12 +38,13 @@
 typedef enum {
     APP_STATE_NORMAL,
     APP_STATE_ACQUIRING,
-    APP_STATE_FITTING
+    APP_STATE_FITTING,
 } app_state_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
 /* --- Flash Storage Addresses --- */
 #define CONFIG_FLASH_ADDR           0x0807F800
 #define CV_MODEL_FLASH_ADDR         0x0807F000
@@ -56,7 +57,6 @@ typedef enum {
 // DMA landing buffer for inbound config frames; oversized so a burst with a stray
 // leading byte is still captured whole and can be re-synchronized below.
 #define UART_RX_BUF_SIZE            32
-#define CONFIG_SYNC_PERIOD          50
 
 /* --- LED UI Timing (ms) --- */
 #define LED_LOW_SIGNAL_PERIOD_MS    250
@@ -65,6 +65,12 @@ typedef enum {
 /* --- Profiling Configuration --- */
 #define ENABLE_PROFILING            1   // DWT cycle profiling
 #define CPU_FREQ_MHZ                120
+
+/* --- Reset Button Delay Time --- */
+#define TIME_10S 9999999
+#define TIME_1S  999999
+
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -79,6 +85,8 @@ DMA_HandleTypeDef hdma_adc1;
 DMA_HandleTypeDef hdma_adc2;
 
 I2C_HandleTypeDef hi2c2;
+
+TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_usart1_tx;
@@ -121,6 +129,9 @@ laser_err_t laser_err = {0};
 volatile uint8_t adc_flag = 0;
 volatile uint16_t adc_overrun = 0;
 volatile uint8_t uart_flag = 0;
+volatile uint8_t tim_10s_passed_flag = 0;
+volatile uint8_t tim_3s_active_flag = 0;
+volatile uint8_t config_flash_cleared_led_status = 0;
 volatile uint16_t uart_underrun = 0;
 volatile uint16_t uart_rx_flag = 0;
 
@@ -137,6 +148,7 @@ static void MX_USART1_UART_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 /* --- UART & Telemetry Helpers --- */
 static void uart_rx_arm(void);
@@ -145,6 +157,7 @@ void laser_err_send(laser_err_t* frame);
 
 /* --- Application Subsystem Tasks --- */
 static void app_load_flash_state(void);
+static void app_clear_config_flash (void);
 static void app_handle_uart_rx(void);
 static void app_update_calibration_state(void);
 static void app_record_calibration_sample(void);
@@ -239,6 +252,38 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     uart_rx_arm();
   }
 }
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+  if (htim->Instance == TIM2) {
+    if (TIM2->ARR == TIME_10S){
+      tim_10s_passed_flag = 1;
+      HAL_TIM_Base_Stop_IT(&htim2);
+      TIM2->ARR = TIME_1S;
+      HAL_TIM_Base_Start_IT(&htim2);
+      tim_3s_active_flag = 1;
+    }
+    else if (TIM2->ARR == TIME_1S) {
+      tim_3s_active_flag = 0;
+      HAL_TIM_Base_Stop_IT(&htim2);
+    }
+  }
+}
+
+void HAL_GPIO_EXTI_Callback (uint16_t GPIO_Pin) {
+
+  if (GPIO_Pin == USER_BUTTON_Pin) {
+    GPIO_PinState pin_state = HAL_GPIO_ReadPin(USER_BUTTON_GPIO_Port, USER_BUTTON_Pin);
+    if (pin_state == GPIO_PIN_RESET) {
+      TIM2->ARR = TIME_10S;
+      HAL_TIM_Base_Start_IT(&htim2);
+    }
+    else {
+      if (TIM2->ARR == TIME_10S)
+      HAL_TIM_Base_Stop_IT(&htim2);
+    }
+  }
+
+}
 /* USER CODE END 0 */
 
 /**
@@ -274,6 +319,7 @@ int main(void)
   MX_ADC2_Init();
   MX_I2C2_Init();
   MX_ADC1_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 #ifdef ENABLE_PROFILING
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -281,6 +327,9 @@ int main(void)
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 #endif
 
+  if (HAL_I2C_EnableListen_IT(&hi2c2) != HAL_OK) {
+    Error_Handler();
+  }
   app_load_flash_state();
 
   uart_rx_arm();
@@ -297,6 +346,7 @@ int main(void)
   while (1)
   {
     app_handle_uart_rx();
+    app_clear_config_flash();
     app_update_calibration_state();
     app_process_adc_buffer();
     app_update_leds();
@@ -500,7 +550,7 @@ static void MX_I2C2_Init(void)
   /* USER CODE END I2C2_Init 1 */
   hi2c2.Instance = I2C2;
   hi2c2.Init.Timing = 0x30A175AB;
-  hi2c2.Init.OwnAddress1 = 0;
+  hi2c2.Init.OwnAddress1 = 128;
   hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c2.Init.OwnAddress2 = 0;
@@ -528,6 +578,51 @@ static void MX_I2C2_Init(void)
   /* USER CODE BEGIN I2C2_Init 2 */
 
   /* USER CODE END I2C2_Init 2 */
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 119;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 9999999;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
 
 }
 
@@ -635,9 +730,13 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : USER_BUTTON_Pin */
   GPIO_InitStruct.Pin = USER_BUTTON_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(USER_BUTTON_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -649,36 +748,82 @@ static void MX_GPIO_Init(void)
 // Load calibration and configuration from Flash, falling back to defaults if empty/invalid.
 static void app_load_flash_state(void)
 {
-  Flash_Read_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, sizeof(laser_calibration_t) / 4);
+  uint16_t config_word_count = (sizeof(laser_config_t) + 3) / 4;
+  uint16_t cal_word_count = (sizeof(laser_calibration_t) + 3) / 4;
 
+  uint8_t update_config = 0;
+  uint8_t update_cal = 0;
+  uint8_t update_prev_cal = 0;
+
+  Flash_Read_Data(CONFIG_FLASH_ADDR, (uint32_t*)&current_config, config_word_count);
+  uint8_t firmware_is_outdated = (current_config.firmware_version != FIRMWARE_VERSION) ? 1 : 0;
+  if (current_config.frame_start != 0xAA || current_config.frame_end != 0xBB || firmware_is_outdated) {
+    current_config = LASER_CONFIG_DEFAULT;
+    update_config = 1;
+
+  }
+  current_config.ctrl_byte = 0;
+
+  Flash_Read_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
   uint32_t* p_a = (uint32_t*)&calibration.cv.a;
-  if (*p_a == 0xFFFFFFFF) {
+  if (*p_a == 0xFFFFFFFF || firmware_is_outdated ||
+      !(calibration.cw.cw_saturation > 0.0f) ||
+      !(calibration.cw.cw_threshold_low > 0.0f)) {
     calibration.cv = DEFAULT_CV_PARAMS;
     calibration.cw = CW_CALIBRATION_DEFAULT;
     calibration.mse = 0.0f;
     calibration.r_squared = 0.0f;
-  }
-  // !(x > 0) also catches NaN from erased flash.
-  if (!(calibration.cw.cw_saturation > 0.0f) || !(calibration.cw.cw_threshold_low > 0.0f)) {
-    calibration.cw = CW_CALIBRATION_DEFAULT;
+    update_cal = 1;
+
   }
 
   // Load previous calibration backup from Flash, falling back to active calibration if empty/invalid.
-  Flash_Read_Data(PREV_CV_MODEL_FLASH_ADDR, (uint32_t*)&prev_calibration, sizeof(laser_calibration_t) / 4);
+  Flash_Read_Data(PREV_CV_MODEL_FLASH_ADDR, (uint32_t*)&prev_calibration, cal_word_count);
   uint32_t* p_prev_a = (uint32_t*)&prev_calibration.cv.a;
-  if (*p_prev_a == 0xFFFFFFFF ||
+  if (*p_prev_a == 0xFFFFFFFF || firmware_is_outdated ||
       !(prev_calibration.cw.cw_saturation > 0.0f) ||
       !(prev_calibration.cw.cw_threshold_low > 0.0f)) {
     prev_calibration = calibration;
+    update_prev_cal = 1;
+
   }
+  if (update_config) {
+    Flash_Write_Data(CONFIG_FLASH_ADDR, (uint32_t*)&current_config, config_word_count);
+  }
+  if (update_cal) {
+    Flash_Write_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
+  }
+  if (update_prev_cal) {
+    Flash_Write_Data(PREV_CV_MODEL_FLASH_ADDR, (uint32_t*)&prev_calibration, cal_word_count);
+  }
+  generate_cv_threshold_lut(cv_threshold_lut, &calibration.cv);
+}
+
+static void app_clear_config_flash (void) {
+  if (!tim_10s_passed_flag) {
+    return;
+  }
+  tim_10s_passed_flag = 0;
+
+  uint16_t config_word_count = (sizeof(laser_config_t) + 3) / 4;
+  uint16_t cal_word_count = (sizeof(laser_calibration_t) + 3) / 4;
+
+  current_config = LASER_CONFIG_DEFAULT;
+
+  calibration.cv = DEFAULT_CV_PARAMS;
+  calibration.cw = CW_CALIBRATION_DEFAULT;
+  calibration.mse = 0.0f;
+  calibration.r_squared = 0.0f;
+
+  prev_calibration = calibration;
 
   generate_cv_threshold_lut(cv_threshold_lut, &calibration.cv);
 
-  Flash_Read_Data(CONFIG_FLASH_ADDR, (uint32_t*)&current_config, sizeof(laser_config_t) / 4);
-  if (current_config.frame_start != 0xAA || current_config.frame_end != 0xBB) {
-    current_config = LASER_CONFIG_DEFAULT;
-  }
-  current_config.ctrl_byte = 0;
+  Flash_Write_Data(CONFIG_FLASH_ADDR, (uint32_t*)&current_config, config_word_count);
+  Flash_Write_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
+  Flash_Write_Data(PREV_CV_MODEL_FLASH_ADDR, (uint32_t*)&prev_calibration, cal_word_count);
+
+  current_config.ctrl_byte |= (REQUEST_PARAM_BIT | REQUEST_ERROR_BIT);
 }
 
 // Handle incoming UART configuration frames and persist changes to Flash.
@@ -689,15 +834,20 @@ static void app_handle_uart_rx(void)
   }
   uart_rx_flag = 0;
 
-  // Persist config to flash only when it actually changed (blocking, ~20-40ms).
-  if (rx_config_buffer.ctrl_byte == 0) {
+  uint8_t pending_req = current_config.ctrl_byte & (REQUEST_PARAM_BIT | REQUEST_ERROR_BIT);
+
+  // Persist config to flash only when it actually changed (blocking).
+  if (rx_config_buffer.ctrl_byte & UPDATE_PARAM_BIT) {
+    rx_config_buffer.ctrl_byte = 0;
+    current_config.ctrl_byte = 0;
     if (memcmp((void*)&current_config, (void*)&rx_config_buffer, sizeof(laser_config_t)) != 0) {
       memcpy((void*)&current_config, (void*)&rx_config_buffer, sizeof(laser_config_t));
       uint16_t word_count = (sizeof(laser_config_t) + 3) / 4;
       Flash_Write_Data(CONFIG_FLASH_ADDR, (uint32_t*)&current_config, word_count);
     }
+    current_config.ctrl_byte = REQUEST_PARAM_BIT | pending_req;
   } else {
-    current_config.ctrl_byte = rx_config_buffer.ctrl_byte;
+    current_config.ctrl_byte = rx_config_buffer.ctrl_byte | pending_req;
   }
 }
 
@@ -718,6 +868,7 @@ static void app_update_calibration_state(void)
       Flash_Write_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
     }
     current_config.ctrl_byte &= ~RESET_TO_DEFAULT_BIT;
+    current_config.ctrl_byte |= REQUEST_ERROR_BIT;
   }
 
   // Revert calibration parameters to the previous saved calibration
@@ -726,11 +877,11 @@ static void app_update_calibration_state(void)
     generate_cv_threshold_lut(cv_threshold_lut, &calibration.cv);
     current_config.ctrl_byte &= ~REVERT_TO_PREV_BIT;
     Flash_Write_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
+    current_config.ctrl_byte |= REQUEST_ERROR_BIT;
   }
 
   // --- Button state machine: hold to sweep/acquire, release to fit ---
-  if (HAL_GPIO_ReadPin(USER_BUTTON_GPIO_Port, USER_BUTTON_Pin) == GPIO_PIN_RESET ||
-      (current_config.ctrl_byte & START_ACQUIRING_BIT)) {
+  if (current_config.ctrl_byte & START_ACQUIRING_BIT) {
     if (app_state == APP_STATE_NORMAL) {
       app_state = APP_STATE_ACQUIRING;
       for (int i = 0; i < CV_LUT_SIZE; i++) {
@@ -739,12 +890,13 @@ static void app_update_calibration_state(void)
       cal_cw_low = FLT_MAX;
       cal_cw_sat = FLT_MAX;
     }
-  } else {
+    current_config.ctrl_byte &= ~START_ACQUIRING_BIT;
+  }
+  else if(current_config.ctrl_byte & STOP_ACQUIRING_BIT){
     if (app_state == APP_STATE_ACQUIRING) {
       app_state = APP_STATE_FITTING;
     }
     current_config.ctrl_byte &= ~STOP_ACQUIRING_BIT;
-    current_config.ctrl_byte &= ~START_ACQUIRING_BIT;
   }
 
   if (app_state == APP_STATE_FITTING) {
@@ -769,6 +921,7 @@ static void app_update_calibration_state(void)
       generate_cv_threshold_lut(cv_threshold_lut, &calibration.cv);
     }
 
+    current_config.ctrl_byte |= REQUEST_ERROR_BIT;
     app_state = APP_STATE_NORMAL;
   }
 }
@@ -808,18 +961,23 @@ static void app_send_telemetry(void)
 {
   if (uart_flag == 1) {
     uart_flag = 0;
-    static uint16_t config_sync_counter = 0;
-    config_sync_counter++;
-    if (config_sync_counter >= CONFIG_SYNC_PERIOD) {
-      config_sync_counter = 0;
-      HAL_UART_Transmit_DMA(&huart1, (uint8_t*)&current_config, sizeof(laser_config_t));
-    } else if (config_sync_counter == 1) {
-      laser_err_send(&laser_err);
-    } else {
-      laser_frame_send(&laser_frame, &sliding_cv, &current_laser_state);
-    }
-  } else {
-    uart_underrun++;
+    //   if (current_config.ctrl_byte & REQUEST_PARAM_BIT) {
+    //     current_config.ctrl_byte &= ~REQUEST_PARAM_BIT;
+    //     HAL_UART_Transmit_DMA(&huart1, (uint8_t*)&current_config, sizeof(laser_config_t));
+    //   }
+    //   else if (current_config.ctrl_byte & REQUEST_ERROR_BIT) {
+    //     current_config.ctrl_byte &= ~REQUEST_ERROR_BIT;
+    //     laser_err_send(&laser_err);
+    //   }
+    //   else {
+    //     laser_frame_send(&laser_frame, &sliding_cv, &current_laser_state);
+    //   }
+    // } else {
+    //   uart_underrun++;
+
+    // char message[50];
+    // sprintf(message, "Hello World\r\n");
+    // HAL_UART_Transmit_DMA(&huart1, (uint8_t*)message, strlen(message));
   }
 }
 
@@ -863,6 +1021,12 @@ static void app_process_adc_buffer(void)
 // Update status LEDs based on the current laser operating regime.
 static void app_update_leds(void)
 {
+  if (tim_3s_active_flag) {
+    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_SET);
+    return;
+  }
+
   uint32_t current_tick = HAL_GetTick();
   static uint32_t last_led_tick = 0;
   static uint8_t red_led_state = 0;

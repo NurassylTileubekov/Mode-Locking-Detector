@@ -5,6 +5,9 @@
 #include <stdint.h>
 #include "CV.h"
 
+// Firmware version
+#define FIRMWARE_VERSION 0xF100
+
 // ML detection thresholds (mV). High threshold is scaled by saturation_percent.
 #define ML_THRESHOLD_LOW_MV   300.0f
 #define ML_THRESHOLD_HIGH_MV  3300.0f
@@ -13,14 +16,16 @@
 #define CW_THRESHOLD_HIGH_MV 3250.0f
 
 // Defaults: target_window_ms, threshold_offset, saturation_percent
-#define LASER_CONFIG_DEFAULT (laser_config_t){0xAA, 0, 25, 0.05f, 0.9f, 0xBB}
+#define LASER_CONFIG_DEFAULT (laser_config_t){0xAA, FIRMWARE_VERSION, 0, 25, 0.05f, 0.9f, 0xBB}
 
 // control byte bits
-#define RESET_TO_DEFAULT_BIT 0b00000001
-#define START_ACQUIRING_BIT 0b00000010
-#define STOP_ACQUIRING_BIT 0b00000100
-#define REVERT_TO_PREV_BIT 0b00001000
-#define SERIAL_CONNECTED_BIT 0b10000000
+#define RESET_TO_DEFAULT_BIT    0b00000001
+#define START_ACQUIRING_BIT     0b00000010
+#define STOP_ACQUIRING_BIT      0b00000100
+#define REVERT_TO_PREV_BIT      0b00001000
+#define REQUEST_PARAM_BIT       0b00010000
+#define REQUEST_ERROR_BIT       0b00100000
+#define UPDATE_PARAM_BIT        0b01000000
 
 enum laser_status {
     LOW_SIGNAL,
@@ -30,10 +35,10 @@ enum laser_status {
     SATURATED,
     INITIATING,
 };
-
 // Configuration received from PC
 typedef struct __attribute__((packed)) {
     uint8_t frame_start;
+    uint16_t firmware_version;
     uint8_t ctrl_byte;
     uint16_t target_window_ms;
     float threshold_offset;
