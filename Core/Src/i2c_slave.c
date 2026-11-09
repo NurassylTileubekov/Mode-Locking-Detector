@@ -10,10 +10,16 @@ extern I2C_HandleTypeDef hi2c2;
 extern UART_HandleTypeDef huart1;
 
 
-#define RxSIZE 6
-uint8_t RxData[RxSIZE];
+#define RX_SIZE 6
+uint8_t rx_data[RX_SIZE];
+uint8_t rx_count = 0;
 
-int count = 0;
+int is_first_received = 0;
+int count_addr = 0;
+int count_rx_cplt = 0;
+int count_error = 0;
+
+void process_data(void);
 
 void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c) {
     HAL_I2C_EnableListen_IT(hi2c);
@@ -21,7 +27,11 @@ void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c) {
 
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, uint16_t AddrMatchCode) {
     if (TransferDirection == I2C_DIRECTION_TRANSMIT) {
-        HAL_I2C_Slave_Sequential_Receive_IT(hi2c, RxData, RxSIZE, I2C_FIRST_AND_LAST_FRAME);
+        if (is_first_received == 0) {
+            rx_count = 0;
+            count_addr++;
+            HAL_I2C_Slave_Seq_Receive_IT(hi2c, rx_data, RX_SIZE, I2C_FIRST_FRAME);
+        }
     }
     else {
         Error_Handler();
@@ -29,12 +39,30 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, ui
 }
 
 void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c) {
-    count++;
-    static char message[50];
-    sprintf(message, "I2C message recieved\r\n");
-    HAL_UART_Transmit_DMA(&huart1, (uint8_t*)message, strlen(message));
+
+    if (is_first_received == 0) {
+        rx_count++;
+        is_first_received = 1;
+        HAL_I2C_Slave_Seq_Receive_IT(hi2c, rx_data + rx_count, rx_data[0], I2C_LAST_FRAME);
+    }
+    else {
+        rx_count += rx_data[0];
+        is_first_received = 0;
+        process_data();
+    }
 }
 
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
+    count_error++;
+    uint32_t error_code = HAL_I2C_GetError(hi2c);
+    if (error_code == 4) { // Acknowledgement Failure Error
+        process_data();
+    }
+
+
     HAL_I2C_EnableListen_IT(hi2c);
+}
+
+void process_data(void) {
+
 }

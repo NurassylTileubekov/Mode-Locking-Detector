@@ -6,7 +6,8 @@
 #include "CV.h"
 
 // Firmware version
-#define FIRMWARE_VERSION 0xF100
+#define FIRMWARE_VERSION          0xF100
+#define FLUSH_FLASH_ON_FW_UPDATE  0
 
 // ML detection thresholds (mV). High threshold is scaled by saturation_percent.
 #define ML_THRESHOLD_LOW_MV   300.0f
@@ -19,13 +20,13 @@
 #define LASER_CONFIG_DEFAULT (laser_config_t){0xAA, FIRMWARE_VERSION, 0, 25, 0.05f, 0.9f, 0xBB}
 
 // control byte bits
-#define RESET_TO_DEFAULT_BIT    0b00000001
-#define START_ACQUIRING_BIT     0b00000010
-#define STOP_ACQUIRING_BIT      0b00000100
-#define REVERT_TO_PREV_BIT      0b00001000
-#define REQUEST_PARAM_BIT       0b00010000
-#define REQUEST_ERROR_BIT       0b00100000
-#define UPDATE_PARAM_BIT        0b01000000
+#define RESET_TO_DEFAULT_BIT    0b00000001U
+#define START_ACQUIRING_BIT     0b00000010U
+#define STOP_ACQUIRING_BIT      0b00000100U
+#define REVERT_TO_PREV_BIT      0b00001000U
+#define REQUEST_PARAM_BIT       0b00010000U
+#define REQUEST_ERROR_BIT       0b00100000U
+#define UPDATE_PARAM_BIT        0b01000000U
 
 enum laser_status {
     LOW_SIGNAL,

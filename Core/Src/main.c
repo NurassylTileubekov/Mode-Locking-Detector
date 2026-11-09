@@ -756,17 +756,21 @@ static void app_load_flash_state(void)
   uint8_t update_prev_cal = 0;
 
   Flash_Read_Data(CONFIG_FLASH_ADDR, (uint32_t*)&current_config, config_word_count);
-  uint8_t firmware_is_outdated = (current_config.firmware_version != FIRMWARE_VERSION) ? 1 : 0;
-  if (current_config.frame_start != 0xAA || current_config.frame_end != 0xBB || firmware_is_outdated) {
+  uint8_t fw_changed = (current_config.firmware_version != FIRMWARE_VERSION) ? 1 : 0;
+  uint8_t flush_on_fw_update = (fw_changed && FLUSH_FLASH_ON_FW_UPDATE) ? 1 : 0;
+
+  if (current_config.frame_start != 0xAA || current_config.frame_end != 0xBB || flush_on_fw_update) {
     current_config = LASER_CONFIG_DEFAULT;
     update_config = 1;
-
+  } else if (fw_changed) {
+    current_config.firmware_version = FIRMWARE_VERSION;
+    update_config = 1;
   }
   current_config.ctrl_byte = 0;
 
   Flash_Read_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
   uint32_t* p_a = (uint32_t*)&calibration.cv.a;
-  if (*p_a == 0xFFFFFFFF || firmware_is_outdated ||
+  if (*p_a == 0xFFFFFFFF || flush_on_fw_update ||
       !(calibration.cw.cw_saturation > 0.0f) ||
       !(calibration.cw.cw_threshold_low > 0.0f)) {
     calibration.cv = DEFAULT_CV_PARAMS;
@@ -780,7 +784,7 @@ static void app_load_flash_state(void)
   // Load previous calibration backup from Flash, falling back to active calibration if empty/invalid.
   Flash_Read_Data(PREV_CV_MODEL_FLASH_ADDR, (uint32_t*)&prev_calibration, cal_word_count);
   uint32_t* p_prev_a = (uint32_t*)&prev_calibration.cv.a;
-  if (*p_prev_a == 0xFFFFFFFF || firmware_is_outdated ||
+  if (*p_prev_a == 0xFFFFFFFF || flush_on_fw_update ||
       !(prev_calibration.cw.cw_saturation > 0.0f) ||
       !(prev_calibration.cw.cw_threshold_low > 0.0f)) {
     prev_calibration = calibration;
@@ -838,6 +842,7 @@ static void app_handle_uart_rx(void)
 
   // Persist config to flash only when it actually changed (blocking).
   if (rx_config_buffer.ctrl_byte & UPDATE_PARAM_BIT) {
+    rx_config_buffer.firmware_version = FIRMWARE_VERSION;
     rx_config_buffer.ctrl_byte = 0;
     current_config.ctrl_byte = 0;
     if (memcmp((void*)&current_config, (void*)&rx_config_buffer, sizeof(laser_config_t)) != 0) {
@@ -961,23 +966,19 @@ static void app_send_telemetry(void)
 {
   if (uart_flag == 1) {
     uart_flag = 0;
-    //   if (current_config.ctrl_byte & REQUEST_PARAM_BIT) {
-    //     current_config.ctrl_byte &= ~REQUEST_PARAM_BIT;
-    //     HAL_UART_Transmit_DMA(&huart1, (uint8_t*)&current_config, sizeof(laser_config_t));
-    //   }
-    //   else if (current_config.ctrl_byte & REQUEST_ERROR_BIT) {
-    //     current_config.ctrl_byte &= ~REQUEST_ERROR_BIT;
-    //     laser_err_send(&laser_err);
-    //   }
-    //   else {
-    //     laser_frame_send(&laser_frame, &sliding_cv, &current_laser_state);
-    //   }
-    // } else {
-    //   uart_underrun++;
-
-    // char message[50];
-    // sprintf(message, "Hello World\r\n");
-    // HAL_UART_Transmit_DMA(&huart1, (uint8_t*)message, strlen(message));
+      if (current_config.ctrl_byte & REQUEST_PARAM_BIT) {
+        current_config.ctrl_byte &= ~REQUEST_PARAM_BIT;
+        HAL_UART_Transmit_DMA(&huart1, (uint8_t*)&current_config, sizeof(laser_config_t));
+      }
+      else if (current_config.ctrl_byte & REQUEST_ERROR_BIT) {
+        current_config.ctrl_byte &= ~REQUEST_ERROR_BIT;
+        laser_err_send(&laser_err);
+      }
+      else {
+        laser_frame_send(&laser_frame, &sliding_cv, &current_laser_state);
+      }
+    } else {
+      uart_underrun++;
   }
 }
 
