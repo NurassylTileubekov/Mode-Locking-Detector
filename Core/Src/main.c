@@ -31,6 +31,7 @@
 #include "laser.h"
 #include "fit.h"
 #include "util.h"
+#include "i2c_slave.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -327,10 +328,8 @@ int main(void)
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 #endif
 
-  if (HAL_I2C_EnableListen_IT(&hi2c2) != HAL_OK) {
-    Error_Handler();
-  }
   app_load_flash_state();
+  i2c_slave_init(&hi2c2, &calibration);
 
   uart_rx_arm();
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
@@ -827,6 +826,7 @@ static void app_clear_config_flash (void) {
   Flash_Write_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
   Flash_Write_Data(PREV_CV_MODEL_FLASH_ADDR, (uint32_t*)&prev_calibration, cal_word_count);
 
+  i2c_slave_sync_ro(&current_laser_state, &sliding_cv, &calibration);
   current_config.ctrl_byte |= (REQUEST_PARAM_BIT | REQUEST_ERROR_BIT);
 }
 
@@ -856,21 +856,32 @@ static void app_handle_uart_rx(void)
   }
 }
 
+static void app_backup_prev_calibration(uint16_t cal_word_count)
+{
+  // Never overwrite a saved calibration backup with an uncalibrated (0.0, 0.0) state;
+  if (calibration.mse == 0.0f && calibration.r_squared == 0.0f) {
+    return;
+  }
+  prev_calibration = calibration;
+  Flash_Write_Data(PREV_CV_MODEL_FLASH_ADDR, (uint32_t*)&prev_calibration, cal_word_count);
+}
+
 // Manage calibration reset/revert, button/UART acquisition trigger, and curve fitting.
 static void app_update_calibration_state(void)
 {
   uint16_t cal_word_count = (sizeof(laser_calibration_t) + 3) / 4;
+  uint8_t cal_updated = 0;
 
   // Reset calibration parameters to default (only backing up if not already at default)
   if (current_config.ctrl_byte & RESET_TO_DEFAULT_BIT) {
     const laser_calibration_t default_cal = { DEFAULT_CV_PARAMS, CW_CALIBRATION_DEFAULT, 0.0f, 0.0f };
     if (memcmp(&calibration, &default_cal, sizeof(laser_calibration_t)) != 0) {
-      prev_calibration = calibration;
-      Flash_Write_Data(PREV_CV_MODEL_FLASH_ADDR, (uint32_t*)&prev_calibration, cal_word_count);
+      app_backup_prev_calibration(cal_word_count);
 
       calibration = default_cal;
       generate_cv_threshold_lut(cv_threshold_lut, &calibration.cv);
       Flash_Write_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
+      cal_updated = 1;
     }
     current_config.ctrl_byte &= ~RESET_TO_DEFAULT_BIT;
     current_config.ctrl_byte |= REQUEST_ERROR_BIT;
@@ -883,6 +894,7 @@ static void app_update_calibration_state(void)
     current_config.ctrl_byte &= ~REVERT_TO_PREV_BIT;
     Flash_Write_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
     current_config.ctrl_byte |= REQUEST_ERROR_BIT;
+    cal_updated = 1;
   }
 
   // --- Button state machine: hold to sweep/acquire, release to fit ---
@@ -912,8 +924,7 @@ static void app_update_calibration_state(void)
     // Only commit the new calibration if curve fitting succeeded (fit_final_mse >= 0).
     // If fitting failed, keep the previous calibration untouched instead of falling back to defaults.
     if (fit_final_mse >= 0.0f) {
-      prev_calibration = calibration;
-      Flash_Write_Data(PREV_CV_MODEL_FLASH_ADDR, (uint32_t*)&prev_calibration, cal_word_count);
+      app_backup_prev_calibration(cal_word_count);
 
       calibration.cv = optimized_params;
       calibration.mse = fit_final_mse;
@@ -924,10 +935,15 @@ static void app_update_calibration_state(void)
 
       Flash_Write_Data(CV_MODEL_FLASH_ADDR, (uint32_t*)&calibration, cal_word_count);
       generate_cv_threshold_lut(cv_threshold_lut, &calibration.cv);
+      cal_updated = 1;
     }
 
     current_config.ctrl_byte |= REQUEST_ERROR_BIT;
     app_state = APP_STATE_NORMAL;
+  }
+
+  if (cal_updated) {
+    i2c_slave_sync_ro(&current_laser_state, &sliding_cv, &calibration);
   }
 }
 
@@ -1003,6 +1019,7 @@ static void app_process_adc_buffer(void)
 
   process_laser_logic(buf_ptr, BUF_SIZE / 2, &sliding_cv, cv_threshold_lut,
                       &active_config, &calibration.cw, adc2_val, &current_laser_state);
+  i2c_slave_sync_ro(&current_laser_state, &sliding_cv, &calibration);
 
   if (app_state == APP_STATE_ACQUIRING) {
     app_record_calibration_sample();
