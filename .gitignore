@@ -3,6 +3,10 @@ build/
 cmake-build-*/
 Debug/
 Release/
+CMakeUserPresets.json
+compile_commands.json
+.cache/
+MXTmpFiles/
 
 # Compiled binaries / firmware images
 *.elf
@@ -17,6 +21,7 @@ Release/
 *.obj
 *.d
 *.su
+*.cyclo
 *.a
 
 # ---- IDE / editor ----
@@ -26,20 +31,23 @@ Release/
 .cproject
 .project
 *.launch
-STM32CubeIDE/.metadata/
+.metadata/
 
-# ---- Python (host-side scripts, e.g. telemetry) ----
-# Kept local only — not ready for the repo yet
-Core/telemetry.py
+# ---- Python / App ----
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+dist/
+*.spec
+MLDConfig_captures/
 
 # ---- Logs & OS cruft ----
 *.log
 .DS_Store
 Thumbs.db
+.directory
 
-# ---- Other ---- #
+# ---- Other ----
 MLDS_G4_new.ioc
+
