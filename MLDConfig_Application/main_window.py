@@ -15,16 +15,21 @@ from PySide6.QtCore import QTimer, Qt, QSettings
 from constants import (
     BAUDRATE,
     CAPTURE_DIR,
+    DEFAULT_FIRMWARE_VERSION,
     MAX_POINTS,
     PLOT_INTERVAL_MS,
     PORT_SCAN_MS,
+    REQUEST_ERROR_BIT,
+    REQUEST_PARAM_BIT,
     RESET_TO_DEFAULT_BIT,
     REVERT_TO_PREV_BIT,
     SERIAL_TIMEOUT_SEC,
     START_ACQUIRING_BIT,
     STOP_ACQUIRING_BIT,
+    UPDATE_PARAM_BIT,
 )
 from protocol import (
+    format_firmware_version,
     list_valid_serial_ports,
     pack_config_packet,
     parse_byte_buffer,
@@ -46,7 +51,9 @@ class MLDConfigWindow(QMainWindow):
         self.ser = None
         self.byte_buffer = bytearray()
         self.recorder = CsvRecorder(out_dir=saved_dir if saved_dir else CAPTURE_DIR)
-        self.last_mcu_config_received = None
+        self.firmware_version = DEFAULT_FIRMWARE_VERSION
+        self.has_received_config = False
+        self.has_received_error = False
         self.last_rx_time = 0.0
 
         # ── Build UI ──────────────────────────────────────────────────────────
@@ -109,6 +116,11 @@ class MLDConfigWindow(QMainWindow):
         self.btn_connect.setMinimumWidth(80)
         self.btn_connect.clicked.connect(self.toggle_connection)
         conn_layout.addWidget(self.btn_connect)
+
+        conn_layout.addSpacing(8)
+        self.lbl_fw = QLabel("FW: —")
+        self.lbl_fw.setStyleSheet("font-weight: bold; font-family: monospace; color: #555555;")
+        conn_layout.addWidget(self.lbl_fw)
         return conn_group
 
     def _build_display_group(self) -> QGroupBox:
@@ -257,13 +269,33 @@ class MLDConfigWindow(QMainWindow):
         try:
             self.ser = serial.Serial(port, BAUDRATE, timeout=0)
             self.byte_buffer.clear()
+            self.has_received_config = False
+            self.has_received_error = False
             self.last_rx_time = time.monotonic()
             self.btn_connect.setText("Disconnect")
             self.combo_ports.setEnabled(False)
             self._set_device_controls_enabled(True)
+            # Request current PARAM and ERROR once upon connection (with a short follow-up
+            # in case the USB-CDC bridge drops bytes immediately upon port open).
+            self._send_command_packet(
+                ctrl_byte=REQUEST_PARAM_BIT | REQUEST_ERROR_BIT,
+                silent=True,
+            )
+            QTimer.singleShot(50, self._retry_initial_sync)
         except (serial.SerialException, OSError) as e:
             self.ser = None
             self._flash_feedback(f"Error: {e}", "#A02828")
+
+    def _retry_initial_sync(self) -> None:
+        if self.ser is None or not self.ser.is_open:
+            return
+        retry_bits = 0
+        if not self.has_received_config:
+            retry_bits |= REQUEST_PARAM_BIT
+        if not self.has_received_error:
+            retry_bits |= REQUEST_ERROR_BIT
+        if retry_bits:
+            self._send_command_packet(ctrl_byte=retry_bits, silent=True)
 
     def disconnect_serial(self) -> None:
         if self.ser is not None:
@@ -281,6 +313,7 @@ class MLDConfigWindow(QMainWindow):
             self.btn_calib.blockSignals(False)
             self._set_ui_blocked_for_calibration(False)
         self._set_device_controls_enabled(False)
+        self.lbl_fw.setText("FW: —")
         self.btn_connect.setText("Connect")
         self.refresh_ports()
         self.combo_ports.setEnabled(self.combo_ports.count() > 0)
@@ -309,17 +342,19 @@ class MLDConfigWindow(QMainWindow):
             self.last_rx_time = time.monotonic()
 
         if parsed.latest_error is not None:
+            self.has_received_error = True
             mse, r_squared = parsed.latest_error
             self.lbl_mse.setText(f"MSE: {mse:.4e}" if abs(mse) < 1e-2 else f"MSE: {mse:.4f}")
             self.lbl_r_squared.setText(f"R²: {r_squared:.4f}")
 
         if parsed.latest_config is not None:
-            if parsed.latest_config != self.last_mcu_config_received:
-                self.last_mcu_config_received = parsed.latest_config
-                _, t_win, t_offset, sat_pct = parsed.latest_config
-                self.txt_t_win.setText(str(t_win))
-                self.txt_t_offset.setText(f"{t_offset:.2f}")
-                self.txt_sat_pct.setText(f"{sat_pct:.2f}")
+            self.has_received_config = True
+            fw_version, _, t_win, t_offset, sat_pct = parsed.latest_config
+            self.firmware_version = fw_version
+            self.lbl_fw.setText(f"FW: {format_firmware_version(fw_version)}")
+            self.txt_t_win.setText(str(t_win))
+            self.txt_t_offset.setText(f"{t_offset:.2f}")
+            self.txt_sat_pct.setText(f"{sat_pct:.2f}")
 
         if not parsed.rms:
             return
@@ -346,29 +381,39 @@ class MLDConfigWindow(QMainWindow):
         self.canvas.show_toast(msg, color)
         self.status_clear_timer.start(2500)
 
-    def _send_command_packet(self, ctrl_byte: int) -> bool:
+    def _send_command_packet(self, ctrl_byte: int, silent: bool = False) -> bool:
         if self.ser is None or not self.ser.is_open:
-            self._flash_feedback("⚠ No serial port open", "#A02828")
+            if not silent:
+                self._flash_feedback("⚠ No serial port open", "#A02828")
             return False
         try:
             t_win    = int(self.txt_t_win.text())
             t_offset = float(self.txt_t_offset.text())
             sat_pct  = float(self.txt_sat_pct.text())
         except ValueError:
-            self._flash_feedback("⚠ Check inputs", "#A02828")
+            if not silent:
+                self._flash_feedback("⚠ Check inputs", "#A02828")
             return False
 
         try:
-            frame = pack_config_packet(ctrl_byte, t_win, t_offset, sat_pct)
+            frame = pack_config_packet(
+                ctrl_byte,
+                t_win,
+                t_offset,
+                sat_pct,
+                firmware_version=self.firmware_version,
+            )
             self.ser.write(frame)
-            self._flash_feedback(f"✓ Sent ctrl={ctrl_byte} win={t_win} offset={t_offset} sat={sat_pct}", "#1E7A34")
+            if not silent:
+                self._flash_feedback(f"✓ Sent ctrl={ctrl_byte} win={t_win} offset={t_offset} sat={sat_pct}", "#1E7A34")
             return True
-        except (struct.error, serial.SerialException):
-            self._flash_feedback("⚠ Send failed", "#A02828")
+        except (struct.error, serial.SerialException, OSError):
+            if not silent:
+                self._flash_feedback("⚠ Send failed", "#A02828")
             return False
 
     def send_config(self) -> None:
-        self._send_command_packet(ctrl_byte=0)
+        self._send_command_packet(ctrl_byte=UPDATE_PARAM_BIT)
 
     def send_reset(self) -> None:
         reply = QMessageBox.question(
@@ -435,6 +480,18 @@ class MLDConfigWindow(QMainWindow):
         self.txt_t_offset.setDisabled(blocked)
         self.txt_sat_pct.setDisabled(blocked)
 
+    def _set_ui_blocked_for_recording(self, blocked: bool) -> None:
+        self.txt_cv_max.setDisabled(blocked)
+        self.spin_window.setDisabled(blocked)
+        self.btn_folder.setDisabled(blocked)
+        self.txt_t_win.setDisabled(blocked)
+        self.txt_t_offset.setDisabled(blocked)
+        self.txt_sat_pct.setDisabled(blocked)
+        self.btn_send.setDisabled(blocked)
+        self.btn_reset.setDisabled(blocked)
+        self.btn_revert.setDisabled(blocked)
+        self.btn_calib.setDisabled(blocked)
+
     def select_capture_folder(self) -> None:
         initial_dir = os.path.abspath(self.recorder.out_dir)
         os.makedirs(initial_dir, exist_ok=True)
@@ -454,23 +511,42 @@ class MLDConfigWindow(QMainWindow):
 
     def toggle_capture(self) -> None:
         if not self.recorder.is_recording:
-            self.recorder.start()
+            metadata = {
+                "Window_ms": self.txt_t_win.text().strip(),
+                "CV_Offset": self.txt_t_offset.text().strip(),
+                "Sat_Limit": self.txt_sat_pct.text().strip(),
+                "MSE": self.lbl_mse.text().replace("MSE:", "").strip(),
+                "R2": self.lbl_r_squared.text().replace("R²:", "").strip(),
+            }
+            self.recorder.start(metadata=metadata)
             self.btn_capture.setText('⏹ Stop')
-            self.btn_folder.setDisabled(True)
+            self._set_ui_blocked_for_recording(True)
             self.canvas.set_recording_indicator(True)
         else:
+            session_dir = self.recorder.current_session_dir or self.recorder.out_dir
+            base_name = self.recorder.current_base_name or time.strftime("capture_%Y%m%d_%H%M%S")
             self.recorder.stop()
-            plot_filename = self.canvas.save_snapshot(self.recorder.out_dir)
+
+            self.canvas.set_recording_indicator(False)
+            self.canvas.hide_toast()
             self.btn_capture.setText('⏺ Record')
-            self.btn_folder.setDisabled(False)
-            self._flash_feedback(f"Saved: {os.path.basename(plot_filename)}", "#1E7A34")
+            self._set_ui_blocked_for_recording(False)
+
+            os.makedirs(session_dir, exist_ok=True)
+            screenshot_path = os.path.join(session_dir, f"{base_name}.png")
+            self.grab().save(screenshot_path, "PNG")
+
+            self._flash_feedback(f"Saved: {base_name}/", "#1E7A34")
 
     def closeEvent(self, event) -> None:
         self.render_timer.stop()
         self.port_scan_timer.stop()
 
         if hasattr(self, 'btn_calib') and self.btn_calib.isChecked():
-            self._send_command_packet(ctrl_byte=STOP_ACQUIRING_BIT)
+            self._send_command_packet(
+                ctrl_byte=STOP_ACQUIRING_BIT,
+                silent=True,
+            )
             if self.ser and self.ser.is_open:
                 self.ser.flush()
                 time.sleep(0.05)

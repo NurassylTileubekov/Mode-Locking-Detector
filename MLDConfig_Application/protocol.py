@@ -3,10 +3,10 @@
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import struct
-import serial
 import serial.tools.list_ports
 
 from constants import (
+    DEFAULT_FIRMWARE_VERSION,
     FRAME_START,
     FRAME_END,
     FRAME_LAYOUTS,
@@ -24,8 +24,16 @@ class ParsedFrames:
     cv: List[float] = field(default_factory=list)
     cv_threshold: List[float] = field(default_factory=list)
     status: List[int] = field(default_factory=list)
-    latest_config: Optional[Tuple[int, int, float, float]] = None
+    latest_config: Optional[Tuple[int, int, int, float, float]] = None
     latest_error: Optional[Tuple[float, float]] = None
+
+
+def format_firmware_version(fw_version: int) -> str:
+    """Format a 16-bit firmware version (e.g. 0xF100 -> '1.0.0')."""
+    major = (fw_version >> 8) & 0x0F
+    minor = (fw_version >> 4) & 0x0F
+    patch = fw_version & 0x0F
+    return f"{major}.{minor}.{patch}"
 
 
 def list_valid_serial_ports() -> List[Tuple[str, str]]:
@@ -47,10 +55,17 @@ def list_valid_serial_ports() -> List[Tuple[str, str]]:
     return valid_ports
 
 
-def pack_config_packet(ctrl_byte: int, target_window_ms: int, threshold_offset: float, saturation_pct: float) -> bytes:
+def pack_config_packet(
+    ctrl_byte: int,
+    target_window_ms: int,
+    threshold_offset: float,
+    saturation_pct: float,
+    firmware_version: int = DEFAULT_FIRMWARE_VERSION,
+) -> bytes:
     """Pack a configuration / command packet to send to the MCU."""
     return TX_CONFIG_STRUCT.pack(
         FRAME_START,
+        firmware_version,
         ctrl_byte,
         target_window_ms,
         threshold_offset,
@@ -106,8 +121,8 @@ def parse_byte_buffer(byte_buffer: bytearray) -> ParsedFrames:
             mse, r_squared = values
             parsed.latest_error = (mse, r_squared)
         elif matched_size == FRAME_SIZE_CONFIG:
-            ctrl, t_win, t_offset, sat_pct = values
-            parsed.latest_config = (ctrl, t_win, t_offset, sat_pct)
+            fw_version, ctrl, t_win, t_offset, sat_pct = values
+            parsed.latest_config = (fw_version, ctrl, t_win, t_offset, sat_pct)
         else:
             rms, cw, cv, cv_threshold, status_code = values
             parsed.rms.append(rms)

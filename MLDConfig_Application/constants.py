@@ -12,25 +12,29 @@ SERIAL_TIMEOUT_SEC = 3.0
 CAPTURE_DIR        = "MLDConfig_captures"
 
 # ── Serial Wire Protocol ──────────────────────────────────────────────────────
-FRAME_START = 0xAA
-FRAME_END   = 0xBB
+FRAME_START              = 0xAA
+FRAME_END                = 0xBB
+DEFAULT_FIRMWARE_VERSION = 0xF100
 
 RESET_TO_DEFAULT_BIT = 0b00000001
 START_ACQUIRING_BIT  = 0b00000010
 STOP_ACQUIRING_BIT   = 0b00000100
 REVERT_TO_PREV_BIT   = 0b00001000
+REQUEST_PARAM_BIT    = 0b00010000
+REQUEST_ERROR_BIT    = 0b00100000
+UPDATE_PARAM_BIT     = 0b01000000
 
 # Wire frame sizes: 1 byte START + struct payload size + 1 byte END
 FRAME_SIZE_TELEMETRY = 19
-FRAME_SIZE_CONFIG    = 13
+FRAME_SIZE_CONFIG    = 15
 FRAME_SIZE_ERROR     = 10
 
 FRAME_LAYOUTS = (
     (struct.Struct('<ffffB'), FRAME_SIZE_TELEMETRY),
-    (struct.Struct('<BHff'),  FRAME_SIZE_CONFIG),
+    (struct.Struct('<HBHff'), FRAME_SIZE_CONFIG),
     (struct.Struct('<ff'),    FRAME_SIZE_ERROR),
 )
-TX_CONFIG_STRUCT = struct.Struct('<BBHffB')
+TX_CONFIG_STRUCT = struct.Struct('<BHBHffB')
 
 # ── Laser Operating Status & Colors ───────────────────────────────────────────
 STATUS_LABELS = {

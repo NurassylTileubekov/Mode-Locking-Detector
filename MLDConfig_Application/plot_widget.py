@@ -1,7 +1,5 @@
 """High-performance PyQtGraph telemetry plot widget and ring-buffer management."""
 
-import os
-import time
 from typing import List
 import numpy as np
 
@@ -11,7 +9,6 @@ from PySide6.QtWidgets import QWidget, QLabel, QGraphicsPathItem
 import pyqtgraph as pg
 
 from constants import (
-    CAPTURE_DIR,
     MAX_POINTS,
     STATE_RGBA_U8,
     STATUS_BADGE_COLOR,
@@ -464,12 +461,3 @@ class TelemetryPlotCanvas(QWidget):
             self.plot_cv.setYRange(0, val, padding=0)
             self._update_image_item(self.state_img2, self._cv_max)
 
-    def save_snapshot(self, out_dir: str = CAPTURE_DIR) -> str:
-        """Save the current plot widget (including HUD overlays) to a timestamped PNG."""
-        os.makedirs(out_dir, exist_ok=True)
-        self.set_recording_indicator(False)
-        self.hide_toast()
-        plot_filename = os.path.join(out_dir, time.strftime("capture_%Y%m%d_%H%M%S") + ".png")
-        pixmap = self.grab()
-        pixmap.save(plot_filename, "PNG")
-        return plot_filename
