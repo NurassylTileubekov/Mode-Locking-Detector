@@ -35,10 +35,10 @@ class TelemetryPlotCanvas(QWidget):
 
         # ── Telemetry Ring Buffers ────────────────────────────────────────────
         self.data_x            = np.arange(MAX_POINTS, dtype=float)
-        self.data_rms          = np.zeros(MAX_POINTS, dtype=float)
-        self.data_cw           = np.zeros(MAX_POINTS, dtype=float)
-        self.data_cv           = np.zeros(MAX_POINTS, dtype=float)
-        self.data_cv_threshold = np.zeros(MAX_POINTS, dtype=float)
+        self.data_rms          = np.full(MAX_POINTS, np.nan, dtype=float)
+        self.data_cw           = np.full(MAX_POINTS, np.nan, dtype=float)
+        self.data_cv           = np.full(MAX_POINTS, np.nan, dtype=float)
+        self.data_cv_threshold = np.full(MAX_POINTS, np.nan, dtype=float)
         self.state_rgba        = np.zeros((1, MAX_POINTS, 4), dtype=np.uint8)
         self._valid_count      = 0
         self._window_samples   = MAX_POINTS
@@ -116,7 +116,7 @@ class TelemetryPlotCanvas(QWidget):
         for curve in (self.line_rms, self.line_cw, self.line_cv, self.line_cv_threshold):
             curve.setClipToView(True)
             curve.setDownsampling(auto=True, method='peak')
-            curve.opts['autoDownsampleFactor'] = 0.5
+            curve.opts['autoDownsampleFactor'] = 1.0
 
         # ── 3. HUD Text Overlays ──────────────────────────────────────────────
         self.lbl_rms = self._make_hud_label(self.plot_amp, 'ML RMS: — mV', '#1A5CB0', min_width=155)
@@ -381,12 +381,13 @@ class TelemetryPlotCanvas(QWidget):
     def _refresh_curve_data(self) -> None:
         if self._valid_count <= 0:
             return
-        start = max(MAX_POINTS - self._valid_count, MAX_POINTS - self._window_samples)
+        start = MAX_POINTS - self._window_samples
         xs = self.data_x[start:]
-        self.line_rms.setData(xs, self.data_rms[start:], skipFiniteCheck=True)
-        self.line_cw.setData(xs, self.data_cw[start:], skipFiniteCheck=True)
-        self.line_cv.setData(xs, self.data_cv[start:], skipFiniteCheck=True)
-        self.line_cv_threshold.setData(xs, self.data_cv_threshold[start:], skipFiniteCheck=True)
+        skip_finite = self._valid_count >= self._window_samples
+        self.line_rms.setData(xs, self.data_rms[start:], skipFiniteCheck=skip_finite)
+        self.line_cw.setData(xs, self.data_cw[start:], skipFiniteCheck=skip_finite)
+        self.line_cv.setData(xs, self.data_cv[start:], skipFiniteCheck=skip_finite)
+        self.line_cv_threshold.setData(xs, self.data_cv_threshold[start:], skipFiniteCheck=skip_finite)
 
     def append_telemetry(
         self,

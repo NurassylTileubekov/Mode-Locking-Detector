@@ -6,8 +6,8 @@ import numpy as np
 # ── Application & Plot Configuration ──────────────────────────────────────────
 BAUDRATE           = 460800
 MAX_POINTS         = 20000  # Must not exceed Qt QImage width limit (32767)
-PLOT_INTERVAL_MS   = 16
-PORT_SCAN_MS       = 100
+PLOT_INTERVAL_MS   = 33
+PORT_SCAN_MS       = 1000
 SERIAL_TIMEOUT_SEC = 3.0
 CAPTURE_DIR        = "MLDConfig_captures"
 
